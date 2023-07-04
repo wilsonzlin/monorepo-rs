@@ -56,7 +56,7 @@ impl<K: Clone + Eq + Hash, L: Default> Deref for ArbitraryLockEntry<K, L> {
 /// This can be cheaply cloned.
 /// Provide your desired lock implementation for the `L` generic parameter. Options include `tokio::sync::RwLock`, `parking_lot::Mutex`, and `std::sync::Exclusive`.
 pub struct ArbitraryLock<K: Clone + Eq + Hash, L: Default> {
-  map: Arc<DashMap<K, Option<Arc<EntryInner<K, L>>>>>,
+  map: Arc<DashMap<K, Option<Arc<EntryInner<K, L>>>, ahash::RandomState>>,
 }
 
 impl<K: Clone + Hash + Eq, L: Default> ArbitraryLock<K, L> {
@@ -83,6 +83,22 @@ impl<K: Clone + Hash + Eq, L: Default> ArbitraryLock<K, L> {
       inner: ManuallyDrop::new(inner),
       map: self.clone(),
     }
+  }
+
+  pub fn len(&self) -> usize {
+    self.map.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.map.is_empty()
+  }
+
+  pub fn capacity(&self) -> usize {
+    self.map.capacity()
+  }
+
+  pub fn shrink_to_fit(&self) {
+    self.map.shrink_to_fit();
   }
 }
 

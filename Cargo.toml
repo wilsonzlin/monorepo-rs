@@ -13,4 +13,5 @@ edition = "2021"
 maintenance = { status = "actively-developed" }
 
 [dependencies]
+ahash = "0.8.3"
 dashmap = "5.4.0"
