@@ -43,7 +43,7 @@ pub async fn build_unix_socket_server(
   axum::Server::builder(acceptor)
 }
 
-pub async fn build_port_server(
+pub fn build_port_server(
   interface: Ipv4Addr,
   port: u16,
 ) -> hyper::server::Builder<hyper::server::conn::AddrIncoming> {
@@ -51,7 +51,7 @@ pub async fn build_port_server(
   axum::Server::bind(&addr)
 }
 
-pub async fn build_port_server_with_tls(
+pub fn build_port_server_with_tls(
   interface: Ipv4Addr,
   port: u16,
   tls: &TlsCfg,
