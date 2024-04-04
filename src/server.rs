@@ -13,13 +13,10 @@ use rustls_pemfile::Item;
 use std::iter;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::remove_file;
 use tokio::fs::set_permissions;
-use tokio::net::UnixListener;
-use tokio_stream::wrappers::UnixListenerStream;
 
 pub struct TlsCfg {
   // These should be in the PEM format.
@@ -29,10 +26,15 @@ pub struct TlsCfg {
   pub ca: Option<Vec<u8>>,
 }
 
+#[cfg(unix)]
 pub async fn build_unix_socket_server(
   path: &Path,
   mode: u32,
 ) -> hyper::server::Builder<impl Accept<Conn = tokio::net::UnixStream, Error = std::io::Error>> {
+  use std::os::unix::fs::PermissionsExt;
+  use tokio::net::UnixListener;
+  use tokio_stream::wrappers::UnixListenerStream;
+
   let _ = remove_file(path).await;
   let unix_listener = UnixListener::bind(path).expect("failed to bind UNIX socket");
   let stream = UnixListenerStream::new(unix_listener);

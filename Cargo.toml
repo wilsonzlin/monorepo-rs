@@ -15,5 +15,5 @@ itertools = "0.12.1"
 rustls = "0.21.6"
 rustls-pemfile = "1.0.3"
 serde_json = "1.0.115"
-tokio = { version = "1", features = ["fs"] }
+tokio = { version = "1", features = ["fs", "net"] }
 tokio-stream = { version = "0.1.14", features = ["net"] }
