@@ -23,10 +23,10 @@ use tokio_stream::wrappers::UnixListenerStream;
 
 pub struct TlsCfg {
   // These should be in the PEM format.
-  cert: Vec<u8>,
-  key: Vec<u8>,
+  pub cert: Vec<u8>,
+  pub key: Vec<u8>,
   // If set, mutual TLS will be enabled, and clients must send a valid certificate.
-  ca: Option<Vec<u8>>,
+  pub ca: Option<Vec<u8>>,
 }
 
 pub async fn build_unix_socket_server(
