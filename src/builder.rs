@@ -1,4 +1,5 @@
 use arrow::array::ArrowPrimitiveType;
+use arrow::array::LargeListBuilder;
 use arrow::array::ListBuilder;
 use arrow::array::PrimitiveBuilder;
 use arrow::array::StringBuilder;
@@ -43,6 +44,17 @@ pub fn append_optional_struct<T>(
 
 pub fn append_list_of_strings<S: AsRef<str>>(
   list_builder: &mut ListBuilder<StringBuilder>,
+  items: impl IntoIterator<Item = S>,
+) {
+  let string_builder = list_builder.values();
+  for item in items {
+    string_builder.append_value(item);
+  }
+  list_builder.append(true);
+}
+
+pub fn append_large_list_of_strings<S: AsRef<str>>(
+  list_builder: &mut LargeListBuilder<StringBuilder>,
   items: impl IntoIterator<Item = S>,
 ) {
   let string_builder = list_builder.values();
