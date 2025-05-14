@@ -12,6 +12,11 @@ pub fn list_of(elem_datatype: DataType) -> DataType {
   DataType::List(Arc::new(Field::new("item", elem_datatype, true)))
 }
 
+pub fn large_list_of(elem_datatype: DataType) -> DataType {
+  // "item" must always be nullable apparently, as list builders seem to always define its type as nullable.
+  DataType::LargeList(Arc::new(Field::new("item", elem_datatype, true)))
+}
+
 pub fn append_list_of_structs<T>(
   list_builder: &mut ListBuilder<StructBuilder>,
   struct_appender: fn(&mut StructBuilder, T),
