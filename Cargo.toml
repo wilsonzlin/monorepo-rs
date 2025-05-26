@@ -1,0 +1,14 @@
+[package]
+name = "tokio-sync-read-stream"
+version = "0.1.0"
+description = "Create a stream from a std::io::Read using Tokio blocking threads"
+license = "Apache-2.0"
+homepage = "https://github.com/wilsonzlin/tokio-sync-read-stream"
+repository = "https://github.com/wilsonzlin/tokio-sync-read-stream.git"
+readme = "README.md"
+authors = ["Wilson Lin <code@wilsonl.in>"]
+edition = "2021"
+
+[dependencies]
+futures = "0.3.27"
+tokio = { version = "1.27.0", features = ["rt"] }
