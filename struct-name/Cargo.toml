@@ -1,6 +1,5 @@
-[package]
-name = "struct-name"
-description = "Trait for struct name"
-license = "MIT"
-version = "0.0.1"
-edition = "2021"
+[workspace]
+members = [
+  "struct-name",
+  "struct-name-macro",
+]

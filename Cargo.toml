@@ -1,5 +1,0 @@
-[workspace]
-members = [
-  "struct-name",
-  "struct-name-macro",
-]
