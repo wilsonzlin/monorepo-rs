@@ -1,0 +1,19 @@
+[package]
+name = "service-toolkit"
+description = "Toolkit for services"
+version = "0.4.0"
+edition = "2021"
+homepage = "https://github.com/wilsonzlin/service-toolkit"
+license = "MIT"
+authors = ["Wilson Lin <code@wilsonl.in>"]
+
+[dependencies]
+axum = { version = "0.6", features = ["http2"] }
+axum-server = { version = "0.5.1", features = ["tls-rustls"] }
+hyper = { version = "0.14.27", features = ["full"] }
+itertools = "0.12.1"
+rustls = "0.21.6"
+rustls-pemfile = "1.0.3"
+serde_json = "1.0.115"
+tokio = { version = "1", features = ["fs", "net"] }
+tokio-stream = { version = "0.1.14", features = ["net"] }
