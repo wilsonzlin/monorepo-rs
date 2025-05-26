@@ -1,0 +1,25 @@
+[package]
+name = "write-journal"
+version = "0.11.1"
+edition = "2021"
+description = "Write to files with a journal"
+license = "Apache-2.0"
+homepage = "https://github.com/wilsonzlin/write-journal"
+repository = "https://github.com/wilsonzlin/write-journal.git"
+authors = ["Wilson Lin <code@wilsonl.in>"]
+
+[features]
+default = ["io_mmap"]
+io_file = ["seekable-async-file/tokio_file"]
+io_mmap = ["seekable-async-file/mmap"]
+
+[dependencies]
+blake3 = "1"
+dashmap = "5.4.0"
+off64 = "0.6"
+rustc-hash = "1.1.0"
+seekable-async-file = { version = "0.11.3", default-features = false }
+signal-future = "0.1.1"
+tinybuf = "0.3.0"
+tokio = "1"
+tracing = "0.1.37"
