@@ -1,0 +1,24 @@
+[package]
+name = "log-structured"
+version = "0.3.0"
+edition = "2021"
+description = "Use log-structured storage"
+license = "Apache-2.0"
+homepage = "https://github.com/wilsonzlin/log-structured"
+repository = "https://github.com/wilsonzlin/log-structured.git"
+authors = ["Wilson Lin <code@wilsonl.in>"]
+
+[features]
+default = ["io_mmap"]
+io_file = ["seekable-async-file/tokio_file", "write-journal/io_file"]
+io_mmap = ["seekable-async-file/mmap", "write-journal/io_mmap"]
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+off64 = "0.6.0"
+parking_lot = "0.12.1"
+seekable-async-file = { version = "0.11.3", default-features = false }
+signal-future = "0.1.1"
+tokio = "1"
+write-journal = { version = "0.11.1", default-features = false }
