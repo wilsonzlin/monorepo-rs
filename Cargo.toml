@@ -1,0 +1,17 @@
+[package]
+name = "arbitrary-lock"
+version = "0.1.1"
+description = "Lock by arbitrary keys"
+license = "MIT"
+homepage = "https://github.com/wilsonzlin/arbitrary-lock"
+repository = "https://github.com/wilsonzlin/arbitrary-lock.git"
+readme = "README.md"
+authors = ["Wilson Lin <code@wilsonl.in>"]
+edition = "2021"
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[dependencies]
+ahash = "0.8.3"
+dashmap = "5.4.0"
