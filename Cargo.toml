@@ -1,0 +1,20 @@
+[workspace]
+members = [
+  "arbitrary-lock",
+  "arrow-helper-rs",
+  "bufpool",
+  "bufpool-fixed",
+  "log-structured",
+  "off64",
+  "persisted-collection",
+  "seekable-async-file",
+  "service-toolkit",
+  "signal-future",
+  "stochastic-group-queue",
+  "stochastic-queue",
+  "struct-name",
+  "struct-name-macro",
+  "tinybuf",
+  "tokio-sync-read-stream",
+  "write-journal",
+]
