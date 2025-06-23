@@ -64,7 +64,7 @@ pub fn record_batch_to_json_array(batch: &RecordBatch) -> Vec<Value> {
   objs
 }
 
-fn array_to_json(array: &dyn Array) -> Vec<Value> {
+pub fn array_to_json(array: &dyn Array) -> Vec<Value> {
   let mut objs = Vec::with_capacity(array.len());
   for i in 0..array.len() {
     let value = array_value_to_json(array, i);
@@ -75,7 +75,7 @@ fn array_to_json(array: &dyn Array) -> Vec<Value> {
 
 // Helper function to convert a single Arrow array value at a given index to a JSON Value.
 // Path should include this row (i.e. `index`).
-fn array_value_to_json(
+pub fn array_value_to_json(
   array: &dyn Array,
   index: usize,
 ) -> Value {
