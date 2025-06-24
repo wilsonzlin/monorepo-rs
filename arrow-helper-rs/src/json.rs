@@ -138,11 +138,11 @@ pub fn array_value_to_json(
 
     // Temporal types to ISO strings
     DataType::Timestamp(TimeUnit::Microsecond, _) => {
-      let ts = as_dt::<TimestampMicrosecondType>(array, index, 1_000_000);
+      let ts = as_dt::<TimestampMicrosecondType>(array, index, 1_000);
       Value::String(ts.to_rfc3339())
     },
     DataType::Timestamp(TimeUnit::Millisecond, _) => {
-      let ts = as_dt::<TimestampMillisecondType>(array, index, 1_000);
+      let ts = as_dt::<TimestampMillisecondType>(array, index, 1_000_000);
       Value::String(ts.to_rfc3339())
     },
     DataType::Timestamp(TimeUnit::Nanosecond, _) => {
@@ -158,7 +158,7 @@ pub fn array_value_to_json(
       Value::String(ts.date_naive().to_string())
     }
     DataType::Date64 => {
-      let ts = as_dt::<Date64Type>(array, index, 1_000);
+      let ts = as_dt::<Date64Type>(array, index, 1_000_000);
       Value::String(ts.date_naive().to_string())
     }
     DataType::Time32(TimeUnit::Second) => {
@@ -166,11 +166,11 @@ pub fn array_value_to_json(
       Value::String(ts.time().to_string())
     }
     DataType::Time32(TimeUnit::Millisecond) => {
-      let ts = as_dt::<Time32MillisecondType>(array, index, 1_000);
+      let ts = as_dt::<Time32MillisecondType>(array, index, 1_000_000);
       Value::String(ts.time().to_string())
     }
     DataType::Time64(TimeUnit::Microsecond) => {
-      let ts = as_dt::<Time64MicrosecondType>(array, index, 1_000_000);
+      let ts = as_dt::<Time64MicrosecondType>(array, index, 1_000);
       Value::String(ts.time().to_string())
     }
     DataType::Time64(TimeUnit::Nanosecond) => {
