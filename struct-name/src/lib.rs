@@ -1,3 +1,3 @@
 pub trait StructName {
-    fn struct_name() -> &'static str;
+  fn struct_name() -> &'static str;
 }

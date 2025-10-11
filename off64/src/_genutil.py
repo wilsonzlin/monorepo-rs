@@ -27,15 +27,14 @@ class ManyTraits:
     out += f"pub trait Off64Read{sfx}<'a, T: 'a + AsRef<[u8]>>: Off64Read{pars}<'a, T> {{{inner}}}"
 
     inner = "\n".join(self.traits[("read", "async")])
-    out += f"#[async_trait::async_trait] pub trait Off64AsyncRead{sfx}<'a, T: 'a + AsRef<[u8]>>: Off64AsyncRead{pars}<'a, T> {{{inner}}}"
+    out += f"pub trait Off64AsyncRead{sfx}<'a, T: 'a + AsRef<[u8]>>: Off64AsyncRead{pars}<'a, T> {{{inner}}}"
 
     for async_ in (True, False):
       for mut in (True, False):
-        async_attr = "#[async_trait::async_trait]" if async_ else ""
         async_name = "Async" if async_ else ""
         mut_name = "Mut" if mut else ""
 
         inner = "\n".join(self.traits[("write", "async" if async_ else "", "mut" if mut else "")])
-        out += f"{async_attr} pub trait Off64{async_name}Write{mut_name}{sfx}: Off64{async_name}Write{mut_name}{pars} {{{inner}}}"
+        out += f"pub trait Off64{async_name}Write{mut_name}{sfx}: Off64{async_name}Write{mut_name}{pars} {{{inner}}}"
 
     return out

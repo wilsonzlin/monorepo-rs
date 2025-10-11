@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use off64::chrono::Off64AsyncReadChrono;
 use off64::chrono::Off64AsyncWriteChrono;
 use off64::chrono::Off64ReadChrono;
@@ -421,7 +420,6 @@ impl Off64WriteChrono for SeekableAsyncFile {}
 #[cfg(feature = "mmap")]
 impl Off64WriteInt for SeekableAsyncFile {}
 
-#[async_trait]
 impl<'a> Off64AsyncRead<'a, Vec<u8>> for SeekableAsyncFile {
   async fn read_at(&self, offset: u64, len: u64) -> Vec<u8> {
     SeekableAsyncFile::read_at(self, offset, len).await
@@ -430,7 +428,6 @@ impl<'a> Off64AsyncRead<'a, Vec<u8>> for SeekableAsyncFile {
 impl<'a> Off64AsyncReadChrono<'a, Vec<u8>> for SeekableAsyncFile {}
 impl<'a> Off64AsyncReadInt<'a, Vec<u8>> for SeekableAsyncFile {}
 
-#[async_trait]
 impl Off64AsyncWrite for SeekableAsyncFile {
   async fn write_at(&self, offset: u64, value: &[u8]) {
     SeekableAsyncFile::write_at(self, offset, value.to_vec()).await

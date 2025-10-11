@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use futures::join;
 use off64::int::Off64ReadInt;
 use parking_lot::Mutex;
@@ -38,7 +37,6 @@ pub enum GarbageCheck {
   IsPadding,
 }
 
-#[async_trait]
 pub trait GarbageChecker {
   async fn check_offset(&self, offset: u64) -> GarbageCheck;
 }

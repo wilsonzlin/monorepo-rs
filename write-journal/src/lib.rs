@@ -4,12 +4,10 @@ use off64::int::Off64WriteMutInt;
 use off64::usz;
 use off64::Off64Read;
 use off64::Off64WriteMut;
-use rustc_hash::FxHasher;
 use seekable_async_file::SeekableAsyncFile;
 use seekable_async_file::WriteRequest;
 use signal_future::SignalFuture;
 use signal_future::SignalFutureController;
-use std::hash::BuildHasherDefault;
 use std::iter::once;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -32,7 +30,7 @@ struct TransactionWrite {
 pub struct Transaction {
   serial_no: u64,
   writes: Vec<TransactionWrite>,
-  overlay: Arc<DashMap<u64, OverlayEntry, BuildHasherDefault<FxHasher>>>,
+  overlay: Arc<DashMap<u64, OverlayEntry>>,
 }
 
 impl Transaction {
@@ -86,10 +84,10 @@ pub struct WriteJournal {
   device: SeekableAsyncFile,
   offset: u64,
   capacity: u64,
-  pending: DashMap<u64, (Transaction, SignalFutureController), BuildHasherDefault<FxHasher>>,
+  pending: DashMap<u64, (Transaction, SignalFutureController)>,
   next_txn_serial_no: AtomicU64,
   commit_delay: Duration,
-  overlay: Arc<DashMap<u64, OverlayEntry, BuildHasherDefault<FxHasher>>>,
+  overlay: Arc<DashMap<u64, OverlayEntry>>,
 }
 
 impl WriteJournal {
@@ -237,6 +235,7 @@ impl WriteJournal {
         let entry_len = txn.serialised_byte_len();
         if len + entry_len > self.capacity - OFFSETOF_ENTRIES {
           // Out of space, wait until next iteration.
+          // TODO THIS MUST PANIC IF THE FIRST, OTHERWISE WE'LL LOOP FOREVER.
           let None = self.pending.insert(serial_no, (txn, fut_ctl)) else {
             unreachable!();
           };

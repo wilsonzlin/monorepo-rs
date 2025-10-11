@@ -23,7 +23,6 @@ pub trait Off64ReadChrono<'a, T: 'a + AsRef<[u8]>>: Off64ReadInt<'a, T> {
     Utc.timestamp_millis_opt(ms).unwrap()
   }
 }
-#[async_trait::async_trait]
 pub trait Off64AsyncReadChrono<'a, T: 'a + AsRef<[u8]>>: Off64AsyncReadInt<'a, T> {
   async fn read_timestamp_be_at(&'a self, offset: u64) -> DateTime<Utc> {
     let sec = self.read_i64_be_at(offset).await;
@@ -45,7 +44,6 @@ pub trait Off64AsyncReadChrono<'a, T: 'a + AsRef<[u8]>>: Off64AsyncReadInt<'a, T
     Utc.timestamp_millis_opt(ms).unwrap()
   }
 }
-#[async_trait::async_trait]
 pub trait Off64AsyncWriteMutChrono: Off64AsyncWriteMutInt {
   async fn write_timestamp_be_at(&mut self, offset: u64, value: DateTime<Utc>) {
     let sec = value.timestamp();
@@ -67,7 +65,6 @@ pub trait Off64AsyncWriteMutChrono: Off64AsyncWriteMutInt {
     self.write_i64_le_at(offset, ms).await;
   }
 }
-#[async_trait::async_trait]
 pub trait Off64AsyncWriteChrono: Off64AsyncWriteInt {
   async fn write_timestamp_be_at(&self, offset: u64, value: DateTime<Utc>) {
     let sec = value.timestamp();

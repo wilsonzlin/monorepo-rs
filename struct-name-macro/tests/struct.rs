@@ -6,5 +6,5 @@ struct MyStruct {}
 
 #[test]
 fn test_derive() {
-    assert_eq!(MyStruct::struct_name(), "MyStruct");
+  assert_eq!(MyStruct::struct_name(), "MyStruct");
 }

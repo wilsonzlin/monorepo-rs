@@ -14,7 +14,6 @@ io_file = ["seekable-async-file/tokio_file", "write-journal/io_file"]
 io_mmap = ["seekable-async-file/mmap", "write-journal/io_mmap"]
 
 [dependencies]
-async-trait = "0.1"
 futures = "0.3"
 off64 = "0.6.0"
 parking_lot = "0.12.1"

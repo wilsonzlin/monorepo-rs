@@ -75,10 +75,7 @@ pub fn array_to_json(array: &dyn Array) -> Vec<Value> {
 
 // Helper function to convert a single Arrow array value at a given index to a JSON Value.
 // Path should include this row (i.e. `index`).
-pub fn array_value_to_json(
-  array: &dyn Array,
-  index: usize,
-) -> Value {
+pub fn array_value_to_json(array: &dyn Array, index: usize) -> Value {
   if array.is_null(index) {
     return Value::Null;
   }
@@ -93,10 +90,7 @@ pub fn array_value_to_json(
     Value::Number(raw.into())
   }
 
-  fn handle_float<A>(
-    array: &dyn Array,
-    index: usize,
-  ) -> Value
+  fn handle_float<A>(array: &dyn Array, index: usize) -> Value
   where
     A: ArrowPrimitiveType,
     A::Native: Into<f64>,
