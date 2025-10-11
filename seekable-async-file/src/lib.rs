@@ -282,6 +282,7 @@ impl SeekableAsyncFile {
     self.bump_write_metrics(len, call_us);
   }
 
+  #[cfg(any(feature = "mmap", feature = "tokio_file"))]
   pub async fn write_at_with_delayed_sync<D: AsRef<[u8]> + Send + 'static>(
     &self,
     writes: impl IntoIterator<Item = WriteRequest<D>>,
@@ -420,18 +421,24 @@ impl Off64WriteChrono for SeekableAsyncFile {}
 #[cfg(feature = "mmap")]
 impl Off64WriteInt for SeekableAsyncFile {}
 
+#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl<'a> Off64AsyncRead<'a, Vec<u8>> for SeekableAsyncFile {
   async fn read_at(&self, offset: u64, len: u64) -> Vec<u8> {
     SeekableAsyncFile::read_at(self, offset, len).await
   }
 }
+#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl<'a> Off64AsyncReadChrono<'a, Vec<u8>> for SeekableAsyncFile {}
+#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl<'a> Off64AsyncReadInt<'a, Vec<u8>> for SeekableAsyncFile {}
 
+#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl Off64AsyncWrite for SeekableAsyncFile {
   async fn write_at(&self, offset: u64, value: &[u8]) {
     SeekableAsyncFile::write_at(self, offset, value.to_vec()).await
   }
 }
+#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl Off64AsyncWriteChrono for SeekableAsyncFile {}
+#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl Off64AsyncWriteInt for SeekableAsyncFile {}
