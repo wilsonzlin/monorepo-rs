@@ -93,9 +93,10 @@ impl Transaction {
 
 // We cannot evict an overlay entry after a commit loop iteration if the data at the offset has since been updated again using the overlay while the commit loop was happening. This is why we need to track `serial_no`. This mechanism requires slower one-by-one deletes by the commit loop, but allows much faster parallel overlay reads with a DashMap. The alternative would be a RwLock over two maps, one for each generation, swapping them around after each loop iteration.
 // Note that it's not necessary to ever evict for correctness (assuming the overlay is used correctly); eviction is done to avoid memory leaking.
+// Public so `OverlayEntry` can be used elsewhere (not just WriteJournal) e.g. mock journals.
 pub struct OverlayEntry {
-  data: TinyBuf,
-  serial_no: u64,
+  pub data: TinyBuf,
+  pub serial_no: u64,
 }
 
 pub struct WriteJournal {
