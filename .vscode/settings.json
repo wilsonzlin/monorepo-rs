@@ -1,0 +1,7 @@
+{
+  "rust-analyzer.cargo.features": [
+    "io_file",
+    "tokio_file"
+  ]
+}
+

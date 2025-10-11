@@ -21,10 +21,11 @@ const OFFSETOF_HASH: u64 = 0;
 const OFFSETOF_LEN: u64 = OFFSETOF_HASH + 32;
 const OFFSETOF_ENTRIES: u64 = OFFSETOF_LEN + 4;
 
-struct TransactionWrite {
-  offset: u64,
-  data: TinyBuf,
-  is_overlay: bool,
+// Public so `Transaction` can be used elsewhere (not just WriteJournal) e.g. mock journals.
+pub struct TransactionWrite {
+  pub offset: u64,
+  pub data: TinyBuf,
+  pub is_overlay: bool,
 }
 
 pub struct Transaction {
@@ -43,6 +44,23 @@ impl Transaction {
         .sum::<usize>(),
     )
     .unwrap()
+  }
+
+  // Public so `Transaction` can be used elsewhere (not just WriteJournal) e.g. mock journals.
+  pub fn new(serial_no: u64, overlay: Arc<DashMap<u64, OverlayEntry>>) -> Self {
+    Self {
+      serial_no,
+      writes: Vec::new(),
+      overlay,
+    }
+  }
+
+  pub fn serial_no(&self) -> u64 {
+    self.serial_no
+  }
+
+  pub fn into_writes(self) -> Vec<TransactionWrite> {
+    self.writes
   }
 
   // Use generic so callers don't even need to `.into()` from Vec, array, etc.
@@ -75,7 +93,7 @@ impl Transaction {
 
 // We cannot evict an overlay entry after a commit loop iteration if the data at the offset has since been updated again using the overlay while the commit loop was happening. This is why we need to track `serial_no`. This mechanism requires slower one-by-one deletes by the commit loop, but allows much faster parallel overlay reads with a DashMap. The alternative would be a RwLock over two maps, one for each generation, swapping them around after each loop iteration.
 // Note that it's not necessary to ever evict for correctness (assuming the overlay is used correctly); eviction is done to avoid memory leaking.
-struct OverlayEntry {
+pub struct OverlayEntry {
   data: TinyBuf,
   serial_no: u64,
 }
@@ -184,11 +202,7 @@ impl WriteJournal {
     let serial_no = self
       .next_txn_serial_no
       .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Transaction {
-      serial_no,
-      writes: Vec::new(),
-      overlay: self.overlay.clone(),
-    }
+    Transaction::new(serial_no, self.overlay.clone())
   }
 
   pub async fn commit_transaction(&self, txn: Transaction) {
