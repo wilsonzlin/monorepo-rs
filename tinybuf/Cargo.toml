@@ -13,6 +13,6 @@ default = []
 serde = ["dep:serde"]
 
 [dependencies]
-off64 = "0.6.0"
+off64 = "0.7.0"
 serde = { version = "1.0.160", features = ["derive"], optional = true }
 static_assertions = "1.1.0"

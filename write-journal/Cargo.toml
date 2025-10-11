@@ -16,7 +16,7 @@ io_mmap = ["seekable-async-file/mmap"]
 [dependencies]
 blake3 = "1"
 dashmap = "5.4.0"
-off64 = "0.6"
+off64 = "0.7"
 seekable-async-file = { version = "0.11.3", default-features = false }
 signal-future = "0.1.1"
 tinybuf = "0.3.0"

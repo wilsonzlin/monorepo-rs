@@ -2,8 +2,8 @@
 members = [
   "arbitrary-lock",
   "arrow-helper-rs",
-  "bufpool",
   "bufpool-fixed",
+  "bufpool",
   "log-structured",
   "off64",
   "persisted-collection",
@@ -12,9 +12,10 @@ members = [
   "signal-future",
   "stochastic-group-queue",
   "stochastic-queue",
-  "struct-name",
   "struct-name-macro",
+  "struct-name",
   "tinybuf",
-  "tokio-sync-read-stream", "uring-file",
+  "tokio-sync-read-stream", 
+  "uring-file",
   "write-journal",
 ]
