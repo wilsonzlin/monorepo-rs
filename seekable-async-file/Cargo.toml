@@ -14,7 +14,6 @@ edition = "2021"
 maintenance = { status = "actively-developed" }
 
 [features]
-default = ["mmap"]
 mmap = ["dep:memmap2"]
 tokio_file = []
 
