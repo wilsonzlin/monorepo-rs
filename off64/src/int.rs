@@ -230,6 +230,7 @@ pub trait Off64ReadInt<'a, T: 'a + AsRef<[u8]>>: Off64Read<'a, T> {
     u64::from_le_bytes(buf)
   }
 }
+#[async_trait::async_trait]
 pub trait Off64AsyncReadInt<'a, T: 'a + AsRef<[u8]>>: Off64AsyncRead<'a, T> {
   async fn read_i16_be_at(&'a self, offset: u64) -> i16 {
     let mut buf = [0u8; 2];
@@ -399,6 +400,7 @@ pub trait Off64AsyncReadInt<'a, T: 'a + AsRef<[u8]>>: Off64AsyncRead<'a, T> {
     u64::from_le_bytes(buf)
   }
 }
+#[async_trait::async_trait]
 pub trait Off64AsyncWriteMutInt: Off64AsyncWriteMut {
   async fn write_i16_be_at(&mut self, offset: u64, value: i16) {
     let buf = value.to_be_bytes();
@@ -540,6 +542,7 @@ pub trait Off64AsyncWriteMutInt: Off64AsyncWriteMut {
     self.write_at(offset, &buf[0..8]).await;
   }
 }
+#[async_trait::async_trait]
 pub trait Off64AsyncWriteInt: Off64AsyncWrite {
   async fn write_i16_be_at(&self, offset: u64, value: i16) {
     let buf = value.to_be_bytes();
