@@ -1,6 +1,7 @@
 {
   "rust-analyzer.cargo.features": [
     "io_file",
+    "serde",
     "tokio_file"
   ]
 }

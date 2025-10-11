@@ -12,7 +12,6 @@ use std::iter::once;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
-use tinybuf::TinyBuf;
 use tokio::time::sleep;
 use tracing::info;
 use tracing::warn;
@@ -24,7 +23,7 @@ const OFFSETOF_ENTRIES: u64 = OFFSETOF_LEN + 4;
 // Public so `Transaction` can be used elsewhere (not just WriteJournal) e.g. mock journals.
 pub struct TransactionWrite {
   pub offset: u64,
-  pub data: TinyBuf,
+  pub data: Vec<u8>,
   pub is_overlay: bool,
 }
 
@@ -64,8 +63,7 @@ impl Transaction {
   }
 
   // Use generic so callers don't even need to `.into()` from Vec, array, etc.
-  pub fn write<D: Into<TinyBuf>>(&mut self, offset: u64, data: D) -> &mut Self {
-    let data = data.into();
+  pub fn write(&mut self, offset: u64, data: Vec<u8>) -> &mut Self {
     self.writes.push(TransactionWrite {
       offset,
       data,
@@ -76,8 +74,7 @@ impl Transaction {
 
   /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
   // Use generic so callers don't even need to `.into()` from Vec, array, etc.
-  pub fn write_with_overlay<D: Into<TinyBuf>>(&mut self, offset: u64, data: D) -> &mut Self {
-    let data = data.into();
+  pub fn write_with_overlay(&mut self, offset: u64, data: Vec<u8>) -> &mut Self {
     self.overlay.insert(offset, OverlayEntry {
       data: data.clone(),
       serial_no: self.serial_no,
@@ -95,7 +92,7 @@ impl Transaction {
 // Note that it's not necessary to ever evict for correctness (assuming the overlay is used correctly); eviction is done to avoid memory leaking.
 // Public so `OverlayEntry` can be used elsewhere (not just WriteJournal) e.g. mock journals.
 pub struct OverlayEntry {
-  pub data: TinyBuf,
+  pub data: Vec<u8>,
   pub serial_no: u64,
 }
 
@@ -179,7 +176,7 @@ impl WriteJournal {
       journal_offset += 8;
       let data_len = raw.read_u32_be_at(journal_offset);
       journal_offset += 4;
-      let data = TinyBuf::from_slice(raw.read_at(journal_offset, data_len.into()));
+      let data = raw.read_at(journal_offset, data_len.into()).to_vec();
       journal_offset += u64::from(data_len);
       self.device.write_at(offset, data).await;
       recovered_bytes_total += data_len;
@@ -216,7 +213,7 @@ impl WriteJournal {
 
   /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
   #[cfg(any(feature = "io_mmap", feature = "io_file"))]
-  pub async fn read_with_overlay(&self, offset: u64, len: u64) -> TinyBuf {
+  pub async fn read_with_overlay(&self, offset: u64, len: u64) -> Vec<u8> {
     if let Some(e) = self.overlay.get(&offset) {
       let overlay_len = e.value().data.len();
       assert_eq!(
@@ -226,7 +223,7 @@ impl WriteJournal {
       );
       e.value().data.clone()
     } else {
-      self.device.read_at(offset, len).await.into()
+      self.device.read_at(offset, len).await
     }
   }
 
