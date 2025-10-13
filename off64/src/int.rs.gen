@@ -66,20 +66,55 @@ macro_rules! u64 {
     u64::try_from($v).unwrap()
   };
 }
+#[macro_export]
+macro_rules! i128 {
+  ($v:expr) => {
+    i128::try_from($v).unwrap()
+  };
+}
+#[macro_export]
+macro_rules! u128 {
+  ($v:expr) => {
+    u128::try_from($v).unwrap()
+  };
+}
 """
 
 mt = ManyTraits("", "Int")
 
 rs_create = ""
-widths = [16, 32, 64]
-for b in [16, 24, 32, 40, 48, 56, 64]:
+
+# Add support for u8 and i8 (no endianness)
+for s in ['i', 'u']:
+  mt.add_read_methods(lambda async_, await_, s=s: f"""
+    {async_} fn read_{s}8_at(&'a self, offset: u64) -> {s}8 {{
+      self.read_at(offset, 1){await_}.as_ref()[0] as {s}8
+    }}
+  """)
+
+  mt.add_write_methods(lambda async_, await_, mut, s=s: f"""
+    {async_} fn write_{s}8_at(&{mut} self, offset: u64, value: {s}8) {{
+      self.write_at(offset, &[value as u8]){await_};
+    }}
+  """)
+
+  rs_create += f"""
+    pub fn create_{s}8(value: {s}8) -> [u8; 1] {{
+      [value as u8]
+    }}
+  """
+
+# Add support for 16-128 bit types (with endianness)
+for b in [16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128]:
   bytes = b // 8
   if b <= 16:
     w = 16
   elif b <= 32:
     w = 32
-  else:
+  elif b <= 64:
     w = 64
+  else:
+    w = 128
   width_bytes = w // 8
   for s in ['i', 'u']:
     for e in ['b', 'l']:
