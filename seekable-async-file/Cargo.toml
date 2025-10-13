@@ -21,6 +21,6 @@ tokio_file = []
 async-trait = "0.1"
 futures = "0.3"
 memmap2 = { version = "0.5", optional = true }
-off64 = "0.8"
+off64 = "0.9"
 signal-future = "0.0.1"
 tokio = { version = "1", features = ["fs", "io-util", "rt", "sync", "time"] }
