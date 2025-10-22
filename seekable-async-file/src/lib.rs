@@ -1,33 +1,27 @@
+pub mod common;
+pub mod file;
+pub mod mmap;
+
+use crate::common::IAsyncIO;
 use async_trait::async_trait;
 use off64::chrono::Off64AsyncReadChrono;
 use off64::chrono::Off64AsyncWriteChrono;
-use off64::chrono::Off64ReadChrono;
-use off64::chrono::Off64WriteChrono;
 use off64::int::Off64AsyncReadInt;
 use off64::int::Off64AsyncWriteInt;
-use off64::int::Off64ReadInt;
-use off64::int::Off64WriteInt;
-use off64::usz;
 use off64::Off64AsyncRead;
 use off64::Off64AsyncWrite;
-use off64::Off64Read;
-use off64::Off64Write;
 use signal_future::SignalFuture;
 use signal_future::SignalFutureController;
 use std::io::SeekFrom;
-#[cfg(feature = "tokio_file")]
-use std::os::unix::prelude::FileExt;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::fs::OpenOptions;
 use tokio::io;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::Mutex;
-use tokio::task::spawn_blocking;
 use tokio::time::sleep;
 use tokio::time::Instant;
 
@@ -125,51 +119,20 @@ impl SeekableAsyncFileMetrics {
 /// A `File`-like value that can perform async `read_at` and `write_at` for I/O at specific offsets without mutating any state (i.e. is thread safe). Metrics are collected, and syncs can be delayed for write batching opportunities as a performance optimisation.
 #[derive(Clone)]
 pub struct SeekableAsyncFile {
-  // Tokio has still not implemented read_at and write_at: https://github.com/tokio-rs/tokio/issues/1529. We need these to be able to share a file descriptor across threads (e.g. use from within async function).
-  // Apparently spawn_blocking is how Tokio does all file operations (as not all platforms have native async I/O), so our use is not worse but not optimised for async I/O either.
-  #[cfg(feature = "tokio_file")]
-  fd: Arc<std::fs::File>,
-  #[cfg(feature = "mmap")]
-  mmap: Arc<memmap2::MmapRaw>,
-  #[cfg(feature = "mmap")]
-  mmap_len: usize,
+  io: Arc<dyn IAsyncIO>,
   sync_delay_us: u64,
   metrics: Arc<SeekableAsyncFileMetrics>,
   pending_sync_state: Arc<Mutex<PendingSyncState>>,
 }
 
 impl SeekableAsyncFile {
-  /// Open a file descriptor in read and write modes, creating it if it doesn't exist. If it already exists, the contents won't be truncated.
-  ///
-  /// If the mmap feature is being used, to save a `stat` call, the size must be provided. This also allows opening non-standard files which may have a size of zero (e.g. block devices). A different size value also allows only using a portion of the beginning of the file.
-  ///
-  /// The `io_direct` and `io_dsync` parameters set the `O_DIRECT` and `O_DSYNC` flags, respectively. Unless you need those flags, provide `false`.
-  ///
-  /// Make sure to execute `start_delayed_data_sync_background_loop` in the background after this call.
   pub async fn open(
-    path: &Path,
-    #[cfg(feature = "mmap")] size: u64,
+    io: Arc<dyn IAsyncIO>,
     metrics: Arc<SeekableAsyncFileMetrics>,
     sync_delay: Duration,
-    flags: i32,
   ) -> Self {
-    let async_fd = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .custom_flags(flags)
-      .open(path)
-      .await
-      .unwrap();
-
-    let fd = async_fd.into_std().await;
-
     SeekableAsyncFile {
-      #[cfg(feature = "tokio_file")]
-      fd: Arc::new(fd),
-      #[cfg(feature = "mmap")]
-      mmap: Arc::new(memmap2::MmapRaw::map_raw(&fd).unwrap()),
-      #[cfg(feature = "mmap")]
-      mmap_len: usz!(size),
+      io,
       sync_delay_us: sync_delay.as_micros().try_into().unwrap(),
       metrics,
       pending_sync_state: Arc::new(Mutex::new(PendingSyncState {
@@ -178,16 +141,6 @@ impl SeekableAsyncFile {
         pending_sync_fut_states: Vec::new(),
       })),
     }
-  }
-
-  #[cfg(feature = "mmap")]
-  pub unsafe fn get_mmap_raw_ptr(&self, offset: u64) -> *const u8 {
-    self.mmap.as_ptr().add(usz!(offset))
-  }
-
-  #[cfg(feature = "mmap")]
-  pub unsafe fn get_mmap_raw_mut_ptr(&self, offset: u64) -> *mut u8 {
-    self.mmap.as_mut_ptr().add(usz!(offset))
   }
 
   fn bump_write_metrics(&self, len: u64, call_us: u64) {
@@ -202,88 +155,21 @@ impl SeekableAsyncFile {
       .fetch_add(call_us, Ordering::Relaxed);
   }
 
-  #[cfg(feature = "mmap")]
   pub async fn read_at(&self, offset: u64, len: u64) -> Vec<u8> {
-    let offset = usz!(offset);
-    let len = usz!(len);
-    let mmap = self.mmap.clone();
-    let mmap_len = self.mmap_len;
-    spawn_blocking(move || {
-      let memory = unsafe { std::slice::from_raw_parts(mmap.as_ptr(), mmap_len) };
-      memory[offset..offset + len].to_vec()
-    })
-    .await
-    .unwrap()
+    self.io.read_at(offset, len).await
   }
 
-  #[cfg(feature = "mmap")]
-  pub fn read_at_sync(&self, offset: u64, len: u64) -> Vec<u8> {
-    let offset = usz!(offset);
-    let len = usz!(len);
-    let memory = unsafe { std::slice::from_raw_parts(self.mmap.as_ptr(), self.mmap_len) };
-    memory[offset..offset + len].to_vec()
-  }
-
-  #[cfg(feature = "tokio_file")]
-  pub async fn read_at(&self, offset: u64, len: u64) -> Vec<u8> {
-    let fd = self.fd.clone();
-    spawn_blocking(move || {
-      let mut buf = vec![0u8; len.try_into().unwrap()];
-      fd.read_exact_at(&mut buf, offset).unwrap();
-      buf
-    })
-    .await
-    .unwrap()
-  }
-
-  #[cfg(feature = "mmap")]
   pub async fn write_at<D: AsRef<[u8]> + Send + 'static>(&self, offset: u64, data: D) {
-    let offset = usz!(offset);
     let len = data.as_ref().len();
     let started = Instant::now();
 
-    let mmap = self.mmap.clone();
-    let mmap_len = self.mmap_len;
-    spawn_blocking(move || {
-      let memory = unsafe { std::slice::from_raw_parts_mut(mmap.as_mut_ptr(), mmap_len) };
-      memory[offset..offset + len].copy_from_slice(data.as_ref());
-    })
-    .await
-    .unwrap();
+    self.io.write_at(offset, data.as_ref()).await;
 
     // This could be significant e.g. page fault.
     let call_us: u64 = started.elapsed().as_micros().try_into().unwrap();
     self.bump_write_metrics(len.try_into().unwrap(), call_us);
   }
 
-  #[cfg(feature = "mmap")]
-  pub fn write_at_sync<D: AsRef<[u8]> + Send + 'static>(&self, offset: u64, data: D) -> () {
-    let offset = usz!(offset);
-    let len = data.as_ref().len();
-    let started = Instant::now();
-
-    let memory = unsafe { std::slice::from_raw_parts_mut(self.mmap.as_mut_ptr(), self.mmap_len) };
-    memory[offset..offset + len].copy_from_slice(data.as_ref());
-
-    // This could be significant e.g. page fault.
-    let call_us: u64 = started.elapsed().as_micros().try_into().unwrap();
-    self.bump_write_metrics(len.try_into().unwrap(), call_us);
-  }
-
-  #[cfg(feature = "tokio_file")]
-  pub async fn write_at<D: AsRef<[u8]> + Send + 'static>(&self, offset: u64, data: D) {
-    let fd = self.fd.clone();
-    let len: u64 = data.as_ref().len().try_into().unwrap();
-    let started = Instant::now();
-    spawn_blocking(move || fd.write_all_at(data.as_ref(), offset).unwrap())
-      .await
-      .unwrap();
-    // Yes, we're including the overhead of Tokio's spawn_blocking.
-    let call_us: u64 = started.elapsed().as_micros().try_into().unwrap();
-    self.bump_write_metrics(len, call_us);
-  }
-
-  #[cfg(any(feature = "mmap", feature = "tokio_file"))]
   pub async fn write_at_with_delayed_sync<D: AsRef<[u8]> + Send + 'static>(
     &self,
     writes: impl IntoIterator<Item = WriteRequest<D>>,
@@ -375,22 +261,8 @@ impl SeekableAsyncFile {
   }
 
   pub async fn sync_data(&self) {
-    #[cfg(feature = "tokio_file")]
-    let fd = self.fd.clone();
-    #[cfg(feature = "mmap")]
-    let mmap = self.mmap.clone();
-
     let started = Instant::now();
-    spawn_blocking(move || {
-      #[cfg(feature = "tokio_file")]
-      fd.sync_data().unwrap();
-
-      #[cfg(feature = "mmap")]
-      mmap.flush().unwrap();
-    })
-    .await
-    .unwrap();
-    // Yes, we're including the overhead of Tokio's spawn_blocking.
+    self.io.sync_data().await;
     let sync_us: u64 = started.elapsed().as_micros().try_into().unwrap();
     self.metrics.sync_counter.fetch_add(1, Ordering::Relaxed);
     self
@@ -400,48 +272,20 @@ impl SeekableAsyncFile {
   }
 }
 
-#[cfg(feature = "mmap")]
-impl<'a> Off64Read<'a, Vec<u8>> for SeekableAsyncFile {
-  fn read_at(&'a self, offset: u64, len: u64) -> Vec<u8> {
-    self.read_at_sync(offset, len)
-  }
-}
-#[cfg(feature = "mmap")]
-impl<'a> Off64ReadChrono<'a, Vec<u8>> for SeekableAsyncFile {}
-#[cfg(feature = "mmap")]
-impl<'a> Off64ReadInt<'a, Vec<u8>> for SeekableAsyncFile {}
-
-#[cfg(feature = "mmap")]
-impl Off64Write for SeekableAsyncFile {
-  fn write_at(&self, offset: u64, value: &[u8]) -> () {
-    self.write_at_sync(offset, value.to_vec())
-  }
-}
-#[cfg(feature = "mmap")]
-impl Off64WriteChrono for SeekableAsyncFile {}
-#[cfg(feature = "mmap")]
-impl Off64WriteInt for SeekableAsyncFile {}
-
-#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 #[async_trait]
 impl<'a> Off64AsyncRead<'a, Vec<u8>> for SeekableAsyncFile {
   async fn read_at(&self, offset: u64, len: u64) -> Vec<u8> {
     SeekableAsyncFile::read_at(self, offset, len).await
   }
 }
-#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl<'a> Off64AsyncReadChrono<'a, Vec<u8>> for SeekableAsyncFile {}
-#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl<'a> Off64AsyncReadInt<'a, Vec<u8>> for SeekableAsyncFile {}
 
-#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 #[async_trait]
 impl Off64AsyncWrite for SeekableAsyncFile {
   async fn write_at(&self, offset: u64, value: &[u8]) {
     SeekableAsyncFile::write_at(self, offset, value.to_vec()).await
   }
 }
-#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl Off64AsyncWriteChrono for SeekableAsyncFile {}
-#[cfg(any(feature = "mmap", feature = "tokio_file"))]
 impl Off64AsyncWriteInt for SeekableAsyncFile {}

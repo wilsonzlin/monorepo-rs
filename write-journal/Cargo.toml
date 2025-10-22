@@ -8,10 +8,6 @@ homepage = "https://github.com/wilsonzlin/write-journal"
 repository = "https://github.com/wilsonzlin/write-journal.git"
 authors = ["Wilson Lin <code@wilsonl.in>"]
 
-[features]
-io_file = ["seekable-async-file/tokio_file"]
-io_mmap = ["seekable-async-file/mmap"]
-
 [dependencies]
 blake3 = "1"
 dashmap = "5.4.0"

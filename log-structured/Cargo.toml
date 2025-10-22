@@ -8,10 +8,6 @@ homepage = "https://github.com/wilsonzlin/log-structured"
 repository = "https://github.com/wilsonzlin/log-structured.git"
 authors = ["Wilson Lin <code@wilsonl.in>"]
 
-[features]
-io_file = ["seekable-async-file/tokio_file", "write-journal/io_file"]
-io_mmap = ["seekable-async-file/mmap", "write-journal/io_mmap"]
-
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"

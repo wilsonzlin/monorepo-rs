@@ -1,11 +1,20 @@
 {
   "name": "Rust",
   "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installOhMyZsh": true,
+      "configureZshAsDefaultShell": true
+    }
+  },
   "customizations": {
     "vscode": {
       "extensions": [
         "rust-lang.rust-analyzer"
-      ]
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      }
     }
   },
   "mounts": [

@@ -133,7 +133,6 @@ impl WriteJournal {
     raw
   }
 
-  #[cfg(any(feature = "io_mmap", feature = "io_file"))]
   pub async fn format_device(&self) {
     self
       .device
@@ -141,7 +140,6 @@ impl WriteJournal {
       .await;
   }
 
-  #[cfg(any(feature = "io_mmap", feature = "io_file"))]
   pub async fn recover(&self) {
     let mut raw = self
       .device
@@ -212,7 +210,6 @@ impl WriteJournal {
   }
 
   /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
-  #[cfg(any(feature = "io_mmap", feature = "io_file"))]
   pub async fn read_with_overlay(&self, offset: u64, len: u64) -> Vec<u8> {
     if let Some(e) = self.overlay.get(&offset) {
       let overlay_len = e.value().data.len();
@@ -233,7 +230,6 @@ impl WriteJournal {
     self.overlay.remove(&offset);
   }
 
-  #[cfg(any(feature = "io_mmap", feature = "io_file"))]
   pub async fn start_commit_background_loop(&self) {
     let mut next_serial = 0;
 
