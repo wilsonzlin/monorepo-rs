@@ -1,13 +1,18 @@
 pub mod common;
 pub mod file;
+pub mod merge;
 pub mod mmap;
 
 use crate::common::IAsyncIO;
+use crate::merge::merge_overlapping_writes;
 use async_trait::async_trait;
+use futures::stream::iter;
+use futures::stream::StreamExt;
 use off64::chrono::Off64AsyncReadChrono;
 use off64::chrono::Off64AsyncWriteChrono;
 use off64::int::Off64AsyncReadInt;
 use off64::int::Off64AsyncWriteInt;
+use off64::u64;
 use off64::Off64AsyncRead;
 use off64::Off64AsyncWrite;
 use signal_future::SignalFuture;
@@ -162,24 +167,27 @@ impl SeekableAsyncFile {
   pub async fn write_at<D: AsRef<[u8]> + Send + 'static>(&self, offset: u64, data: D) {
     let len = data.as_ref().len();
     let started = Instant::now();
-
     self.io.write_at(offset, data.as_ref()).await;
-
-    // This could be significant e.g. page fault.
     let call_us: u64 = started.elapsed().as_micros().try_into().unwrap();
     self.bump_write_metrics(len.try_into().unwrap(), call_us);
   }
 
+  // Later writes win where there are overlaps.
   pub async fn write_at_with_delayed_sync<D: AsRef<[u8]> + Send + 'static>(
     &self,
     writes: impl IntoIterator<Item = WriteRequest<D>>,
   ) {
-    let mut count: u64 = 0;
-    // WARNING: We cannot make this concurrent as writes must be logically applied in order.
-    for w in writes {
-      count += 1;
-      self.write_at(w.offset, w.data).await;
-    }
+    // Count original writes and merge overlapping intervals.
+    let writes_vec: Vec<_> = writes.into_iter().collect();
+    let count = u64!(writes_vec.len());
+    let intervals = merge_overlapping_writes(writes_vec);
+
+    // Execute all non-overlapping writes concurrently.
+    iter(intervals)
+      .for_each_concurrent(None, async |(offset, (_, data))| {
+        self.write_at(offset, data).await;
+      })
+      .await;
 
     let (fut, fut_ctl) = SignalFuture::new();
 
