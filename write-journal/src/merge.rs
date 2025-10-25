@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 /// Merges a sequence of writes that may overlap, producing a minimal set of non-overlapping writes.
 /// Later writes win where there are overlaps.
 ///
-/// Returns a BTreeMap where keys are start offsets and values are (end_offset, merged_data).
+/// Returns a BTreeMap where keys are start offsets and values are the merged data.
 /// The result contains only non-overlapping intervals with the final data for each byte position.
 ///
 /// # Complexity
@@ -19,12 +19,12 @@ use std::collections::BTreeMap;
 ///   WriteRequest::new(2, vec![5, 6]),  // Overlaps and wins
 /// ];
 /// let merged = merge_overlapping_writes(writes);
-/// // Result: {0 => (2, [1, 2]), 2 => (4, [5, 6])}
+/// // Result: {0 => [1, 2], 2 => [5, 6]}
 /// ```
 pub(crate) fn merge_overlapping_writes(
   writes: impl IntoIterator<Item = (u64, Vec<u8>)>,
-) -> BTreeMap<u64, (u64, Vec<u8>)> {
-  let mut intervals: BTreeMap<u64, (u64, Vec<u8>)> = BTreeMap::new();
+) -> BTreeMap<u64, Vec<u8>> {
+  let mut intervals: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
 
   for (offset, data) in writes {
     let end = offset + u64!(data.len());
@@ -33,7 +33,7 @@ pub(crate) fn merge_overlapping_writes(
     // An interval [s, e) overlaps if s < end && e > offset.
     let overlapping_keys: Vec<u64> = intervals
       .range(..end)
-      .filter(|(_, &(old_end, _))| old_end > offset)
+      .filter(|(&start, old_data)| start + u64!(old_data.len()) > offset)
       .map(|(&start, _)| start)
       .collect();
 
@@ -41,27 +41,28 @@ pub(crate) fn merge_overlapping_writes(
     let mut to_insert = Vec::new();
 
     for key in overlapping_keys {
-      let (old_end, old_data) = intervals.remove(&key).unwrap();
+      let old_data = intervals.remove(&key).unwrap();
+      let old_end = key + u64!(old_data.len());
 
       // Preserve the part before our new write if it exists.
       if key < offset {
         let preserved_len = usz!(offset - key);
-        to_insert.push((key, offset, old_data[..preserved_len].to_vec()));
+        to_insert.push((key, old_data[..preserved_len].to_vec()));
       }
 
       // Preserve the part after our new write if it exists.
       if old_end > end {
         let skip_len = usz!(end - key);
-        to_insert.push((end, old_end, old_data[skip_len..].to_vec()));
+        to_insert.push((end, old_data[skip_len..].to_vec()));
       }
     }
 
     // Insert the new write.
-    to_insert.push((offset, end, data.to_vec()));
+    to_insert.push((offset, data.to_vec()));
 
     // Insert all intervals back.
-    for (start, end, data) in to_insert {
-      intervals.insert(start, (end, data));
+    for (start, data) in to_insert {
+      intervals.insert(start, data);
     }
   }
 
@@ -73,10 +74,10 @@ mod tests {
   use super::*;
 
   /// Helper to verify the merged intervals match expected results
-  fn assert_intervals(intervals: &BTreeMap<u64, (u64, Vec<u8>)>, expected: &[(u64, u64, Vec<u8>)]) {
+  fn assert_intervals(intervals: &BTreeMap<u64, Vec<u8>>, expected: &[(u64, Vec<u8>)]) {
     let actual: Vec<_> = intervals
       .iter()
-      .map(|(&start, &(end, ref data))| (start, end, data.clone()))
+      .map(|(&start, data)| (start, data.clone()))
       .collect();
     assert_eq!(
       actual, expected,
@@ -96,7 +97,7 @@ mod tests {
   fn test_merge_single_write() {
     let writes = vec![(10, vec![1, 2, 3, 4])];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[(10, 14, vec![1, 2, 3, 4])]);
+    assert_intervals(&merged, &[(10, vec![1, 2, 3, 4])]);
   }
 
   #[test]
@@ -104,9 +105,9 @@ mod tests {
     let writes = vec![(0, vec![1, 2]), (2, vec![3, 4]), (4, vec![5, 6])];
     let merged = merge_overlapping_writes(writes);
     assert_intervals(&merged, &[
-      (0, 2, vec![1, 2]),
-      (2, 4, vec![3, 4]),
-      (4, 6, vec![5, 6]),
+      (0, vec![1, 2]),
+      (2, vec![3, 4]),
+      (4, vec![5, 6]),
     ]);
   }
 
@@ -115,9 +116,9 @@ mod tests {
     let writes = vec![(0, vec![1, 2]), (10, vec![3, 4]), (20, vec![5, 6])];
     let merged = merge_overlapping_writes(writes);
     assert_intervals(&merged, &[
-      (0, 2, vec![1, 2]),
-      (10, 12, vec![3, 4]),
-      (20, 22, vec![5, 6]),
+      (0, vec![1, 2]),
+      (10, vec![3, 4]),
+      (20, vec![5, 6]),
     ]);
   }
 
@@ -128,7 +129,7 @@ mod tests {
       (0, vec![5, 6, 7, 8]), // Completely overwrites first
     ];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[(0, 4, vec![5, 6, 7, 8])]);
+    assert_intervals(&merged, &[(0, vec![5, 6, 7, 8])]);
   }
 
   #[test]
@@ -138,7 +139,7 @@ mod tests {
       (2, vec![5, 6]),       // [2..4) overlaps
     ];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[(0, 2, vec![1, 2]), (2, 4, vec![5, 6])]);
+    assert_intervals(&merged, &[(0, vec![1, 2]), (2, vec![5, 6])]);
   }
 
   #[test]
@@ -148,7 +149,7 @@ mod tests {
       (0, vec![5, 6]),       // [0..2) adjacent, not overlapping
     ];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[(0, 2, vec![5, 6]), (2, 6, vec![1, 2, 3, 4])]);
+    assert_intervals(&merged, &[(0, vec![5, 6]), (2, vec![1, 2, 3, 4])]);
   }
 
   #[test]
@@ -159,9 +160,9 @@ mod tests {
     ];
     let merged = merge_overlapping_writes(writes);
     assert_intervals(&merged, &[
-      (0, 2, vec![1, 2]),
-      (2, 4, vec![7, 8]),
-      (4, 6, vec![5, 6]),
+      (0, vec![1, 2]),
+      (2, vec![7, 8]),
+      (4, vec![5, 6]),
     ]);
   }
 
@@ -174,7 +175,7 @@ mod tests {
       (1, vec![7, 8, 9, 10, 11]), // [1..6) spans all three
     ];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[(0, 1, vec![1]), (1, 6, vec![7, 8, 9, 10, 11])]);
+    assert_intervals(&merged, &[(0, vec![1]), (1, vec![7, 8, 9, 10, 11])]);
   }
 
   #[test]
@@ -186,9 +187,9 @@ mod tests {
     ];
     let merged = merge_overlapping_writes(writes);
     assert_intervals(&merged, &[
-      (0, 1, vec![1]),
-      (1, 2, vec![5]),
-      (2, 4, vec![7, 8]),
+      (0, vec![1]),
+      (1, vec![5]),
+      (2, vec![7, 8]),
     ]);
   }
 
@@ -196,7 +197,7 @@ mod tests {
   fn test_merge_identical_offsets_later_wins() {
     let writes = vec![(5, vec![1, 2, 3]), (5, vec![4, 5, 6]), (5, vec![7, 8, 9])];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[(5, 8, vec![7, 8, 9])]);
+    assert_intervals(&merged, &[(5, vec![7, 8, 9])]);
   }
 
   #[test]
@@ -216,11 +217,11 @@ mod tests {
     // [3..6): 6,7,8
     // [6..9): 12,13,14
     assert_intervals(&merged, &[
-      (0, 1, vec![1]),
-      (1, 2, vec![10]),
-      (2, 3, vec![15]),
-      (3, 6, vec![6, 7, 8]),
-      (6, 9, vec![12, 13, 14]),
+      (0, vec![1]),
+      (1, vec![10]),
+      (2, vec![15]),
+      (3, vec![6, 7, 8]),
+      (6, vec![12, 13, 14]),
     ]);
   }
 
@@ -233,7 +234,7 @@ mod tests {
     ];
     let merged = merge_overlapping_writes(writes);
     // The empty write creates [10, 10) which is valid but has no effect
-    assert_intervals(&merged, &[(5, 8, vec![1, 2, 3]), (10, 10, vec![])]);
+    assert_intervals(&merged, &[(5, vec![1, 2, 3]), (10, vec![])]);
   }
 
   #[test]
@@ -242,9 +243,9 @@ mod tests {
     let writes = vec![(20, vec![5, 6]), (0, vec![1, 2]), (10, vec![3, 4])];
     let merged = merge_overlapping_writes(writes);
     assert_intervals(&merged, &[
-      (0, 2, vec![1, 2]),
-      (10, 12, vec![3, 4]),
-      (20, 22, vec![5, 6]),
+      (0, vec![1, 2]),
+      (10, vec![3, 4]),
+      (20, vec![5, 6]),
     ]);
   }
 
@@ -257,7 +258,7 @@ mod tests {
     ];
     let merged = merge_overlapping_writes(writes);
     // These are adjacent, not overlapping, so they stay separate
-    assert_intervals(&merged, &[(0, 2, vec![1, 2]), (2, 4, vec![3, 4])]);
+    assert_intervals(&merged, &[(0, vec![1, 2]), (2, vec![3, 4])]);
   }
 
   #[test]
@@ -272,8 +273,8 @@ mod tests {
     ];
     let merged = merge_overlapping_writes(writes);
     assert_intervals(&merged, &[
-      (0, 1, vec![1]),
-      (1, 9, vec![10, 11, 12, 13, 14, 15, 16, 17]),
+      (0, vec![1]),
+      (1, vec![10, 11, 12, 13, 14, 15, 16, 17]),
     ]);
   }
 
@@ -285,8 +286,8 @@ mod tests {
     ];
     let merged = merge_overlapping_writes(writes);
     assert_intervals(&merged, &[
-      (5, 11, vec![5, 6, 7, 8, 9, 10]),
-      (11, 14, vec![2, 3, 4]),
+      (5, vec![5, 6, 7, 8, 9, 10]),
+      (11, vec![2, 3, 4]),
     ]);
   }
 
@@ -297,7 +298,7 @@ mod tests {
       (7, vec![5, 6, 7, 8, 9]), // [7..12) extends right and overlaps
     ];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[(5, 7, vec![1, 2]), (7, 12, vec![5, 6, 7, 8, 9])]);
+    assert_intervals(&merged, &[(5, vec![1, 2]), (7, vec![5, 6, 7, 8, 9])]);
   }
 
   #[test]
@@ -314,10 +315,10 @@ mod tests {
     // [4..6): 7,8
     // [6..9): 10,11,12
     assert_intervals(&merged, &[
-      (0, 2, vec![1, 2]),
-      (2, 4, vec![4, 5]),
-      (4, 6, vec![7, 8]),
-      (6, 9, vec![10, 11, 12]),
+      (0, vec![1, 2]),
+      (2, vec![4, 5]),
+      (4, vec![7, 8]),
+      (6, vec![10, 11, 12]),
     ]);
   }
 
@@ -332,7 +333,7 @@ mod tests {
       (5, vec![5]),
     ];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[(5, 6, vec![5])]);
+    assert_intervals(&merged, &[(5, vec![5])]);
   }
 
   #[test]
@@ -344,9 +345,9 @@ mod tests {
     ];
     let merged = merge_overlapping_writes(writes);
     assert_intervals(&merged, &[
-      (0, 2, vec![10, 20]),
-      (2, 4, vec![99, 88]),
-      (4, 8, vec![50, 60, 70, 80]),
+      (0, vec![10, 20]),
+      (2, vec![99, 88]),
+      (4, vec![50, 60, 70, 80]),
     ]);
   }
 }

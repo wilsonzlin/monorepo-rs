@@ -29,12 +29,14 @@ const OFFSETOF_LEN: u64 = OFFSETOF_HASH + 32;
 const OFFSETOF_ENTRIES: u64 = OFFSETOF_LEN + 4;
 
 // Public so `Transaction` can be used elsewhere (not just WriteJournal) e.g. mock journals.
+#[derive(Debug)]
 pub struct TransactionWrite {
   pub offset: u64,
   pub data: Vec<u8>,
   pub is_overlay: bool,
 }
 
+#[derive(Debug)]
 pub struct Transaction {
   serial_no: u64,
   writes: Vec<TransactionWrite>,
@@ -99,6 +101,7 @@ impl Transaction {
 // We cannot evict an overlay entry after a commit loop iteration if the data at the offset has since been updated again using the overlay while the commit loop was happening. This is why we need to track `serial_no`. This mechanism requires slower one-by-one deletes by the commit loop, but allows much faster parallel overlay reads with a DashMap. The alternative would be a RwLock over two maps, one for each generation, swapping them around after each loop iteration.
 // Note that it's not necessary to ever evict for correctness (assuming the overlay is used correctly); eviction is done to avoid memory leaking.
 // Public so `OverlayEntry` can be used elsewhere (not just WriteJournal) e.g. mock journals.
+#[derive(Debug)]
 pub struct OverlayEntry {
   pub data: Vec<u8>,
   pub serial_no: u64,
@@ -328,7 +331,7 @@ impl WriteJournal {
       // Keep semantic order without slowing down to serial writes.
       let writes_ordered = merge_overlapping_writes(writes);
       iter(writes_ordered)
-        .for_each_concurrent(None, async |(_, (offset, data))| {
+        .for_each_concurrent(None, async |(offset, data)| {
           self.device.write_at(offset, data).await;
         })
         .await;
