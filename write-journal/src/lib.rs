@@ -147,7 +147,7 @@ pub struct WriteJournal {
   device: DsyncFile,
   offset: u64,
   capacity: u64,
-  pending: UnboundedSender<(Transaction, SignalFutureController)>,
+  sender: UnboundedSender<(Transaction, SignalFutureController)>,
   next_txn_serial_no: AtomicU64,
   overlay: Arc<DashMap<u64, OverlayEntry>>,
 }
@@ -161,7 +161,7 @@ impl WriteJournal {
       device: DsyncFile::open(path).await,
       offset,
       capacity,
-      pending: tx,
+      sender: tx,
       next_txn_serial_no: AtomicU64::new(0),
       overlay: Default::default(),
     });
@@ -248,7 +248,7 @@ impl WriteJournal {
 
   pub async fn commit_transaction(&self, txn: Transaction) {
     let (fut, fut_ctl) = SignalFuture::new();
-    self.pending.send((txn, fut_ctl)).unwrap();
+    self.sender.send((txn, fut_ctl)).unwrap();
     fut.await;
   }
 
