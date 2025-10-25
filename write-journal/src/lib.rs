@@ -1,18 +1,26 @@
+pub mod merge;
+
+use crate::merge::merge_overlapping_writes;
 use dashmap::DashMap;
+use futures::stream::iter;
+use futures::StreamExt;
 use off64::int::Off64ReadInt;
 use off64::int::Off64WriteMutInt;
 use off64::usz;
 use off64::Off64Read;
 use off64::Off64WriteMut;
-use seekable_async_file::SeekableAsyncFile;
-use seekable_async_file::WriteRequest;
 use signal_future::SignalFuture;
 use signal_future::SignalFutureController;
-use std::iter::once;
+use std::collections::HashMap;
+use std::os::unix::fs::FileExt;
+use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
+use tokio::fs::OpenOptions;
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::spawn_blocking;
 use tracing::info;
 use tracing::warn;
 
@@ -96,33 +104,72 @@ pub struct OverlayEntry {
   pub serial_no: u64,
 }
 
+struct DsyncFile(Arc<std::fs::File>);
+
+impl DsyncFile {
+  pub async fn open(path: &Path) -> Self {
+    Self(
+      OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_DSYNC)
+        .open(path)
+        .await
+        .unwrap()
+        .into_std()
+        .await
+        .into(),
+    )
+  }
+
+  pub async fn read_at(&self, offset: u64, len: u64) -> Vec<u8> {
+    let file = self.0.clone();
+    spawn_blocking(move || {
+      let mut buf = vec![0u8; usz!(len)];
+      file.read_exact_at(&mut buf, offset).unwrap();
+      buf
+    })
+    .await
+    .unwrap()
+  }
+
+  pub async fn write_at(&self, offset: u64, data: Vec<u8>) {
+    let file = self.0.clone();
+    spawn_blocking(move || {
+      file.write_all_at(&data, offset).unwrap();
+    })
+    .await
+    .unwrap()
+  }
+}
+
 pub struct WriteJournal {
-  device: SeekableAsyncFile,
+  device: DsyncFile,
   offset: u64,
   capacity: u64,
-  pending: DashMap<u64, (Transaction, SignalFutureController)>,
+  pending: UnboundedSender<(Transaction, SignalFutureController)>,
   next_txn_serial_no: AtomicU64,
-  commit_delay: Duration,
   overlay: Arc<DashMap<u64, OverlayEntry>>,
 }
 
 impl WriteJournal {
-  pub fn new(
-    device: SeekableAsyncFile,
-    offset: u64,
-    capacity: u64,
-    commit_delay: Duration,
-  ) -> Self {
+  pub async fn open(path: &Path, offset: u64, capacity: u64) -> Arc<Self> {
     assert!(capacity > OFFSETOF_ENTRIES && capacity <= u32::MAX.into());
-    Self {
-      device,
+    let (tx, rx) = unbounded_channel();
+    let journal = Arc::new(Self {
+      // We use DSYNC for more efficient fsync. All our writes must be immediately fsync'd — we don't use kernel buffer as intermediate storage, nor split writes — but fsync isn't granular (and sync_file_range is not portable). Delaying sync is even more pointless.
+      device: DsyncFile::open(path).await,
       offset,
       capacity,
-      pending: Default::default(),
+      pending: tx,
       next_txn_serial_no: AtomicU64::new(0),
-      commit_delay,
       overlay: Default::default(),
-    }
+    });
+    tokio::task::spawn({
+      let journal = journal.clone();
+      async move { journal.start_commit_background_loop(rx).await }
+    });
+    journal
   }
 
   pub fn generate_blank_state(&self) -> Vec<u8> {
@@ -179,14 +226,12 @@ impl WriteJournal {
       self.device.write_at(offset, data).await;
       recovered_bytes_total += data_len;
     }
-    self.device.sync_data().await;
 
     // WARNING: Make sure to sync writes BEFORE erasing journal.
     self
       .device
       .write_at(self.offset, self.generate_blank_state())
       .await;
-    self.device.sync_data().await;
     info!(
       recovered_entries = len,
       recovered_bytes = recovered_bytes_total,
@@ -203,9 +248,7 @@ impl WriteJournal {
 
   pub async fn commit_transaction(&self, txn: Transaction) {
     let (fut, fut_ctl) = SignalFuture::new();
-    let None = self.pending.insert(txn.serial_no, (txn, fut_ctl)) else {
-      unreachable!();
-    };
+    self.pending.send((txn, fut_ctl)).unwrap();
     fut.await;
   }
 
@@ -230,25 +273,29 @@ impl WriteJournal {
     self.overlay.remove(&offset);
   }
 
-  pub async fn start_commit_background_loop(&self) {
+  async fn start_commit_background_loop(
+    &self,
+    mut rx: UnboundedReceiver<(Transaction, SignalFutureController)>,
+  ) {
     let mut next_serial = 0;
-
-    // These are outside and cleared after each iteration to avoid reallocations.
-    let mut writes = Vec::new();
-    let mut fut_ctls = Vec::new();
-    let mut overlays_to_delete = Vec::new();
-    loop {
-      sleep(self.commit_delay).await;
+    let mut pending = HashMap::new();
+    // There's no point to sleeping. We can only serially do I/O. So in the time we wait, we could have just done some I/O.
+    // Also, tokio::sleep granularity is 1 ms. Super high latency.
+    while let Some((txn, fut_ctl)) = rx.recv().await {
+      pending.insert(txn.serial_no, (txn, fut_ctl));
 
       let mut len = 0;
       let mut raw = vec![0u8; usz!(OFFSETOF_ENTRIES)];
+      let mut writes = Vec::new();
+      let mut overlays_to_delete = Vec::new();
+      let mut fut_ctls = Vec::new();
       // We must `remove` to take ownership of the write data and avoid copying. But this means we need to reinsert into the map if we cannot process a transaction in this iteration.
-      while let Some((serial_no, (txn, fut_ctl))) = self.pending.remove(&next_serial) {
+      while let Some((serial_no, (txn, fut_ctl))) = pending.remove_entry(&next_serial) {
         let entry_len = txn.serialised_byte_len();
         if len + entry_len > self.capacity - OFFSETOF_ENTRIES {
           // Out of space, wait until next iteration.
           // TODO THIS MUST PANIC IF THE FIRST, OTHERWISE WE'LL LOOP FOREVER.
-          let None = self.pending.insert(serial_no, (txn, fut_ctl)) else {
+          let None = pending.insert(serial_no, (txn, fut_ctl)) else {
             unreachable!();
           };
           break;
@@ -259,7 +306,7 @@ impl WriteJournal {
           raw.extend_from_slice(&w.offset.to_be_bytes());
           raw.extend_from_slice(&data_len.to_be_bytes());
           raw.extend_from_slice(&w.data);
-          writes.push(WriteRequest::new(w.offset, w.data));
+          writes.push((w.offset, w.data));
           if w.is_overlay {
             overlays_to_delete.push((w.offset, serial_no));
           };
@@ -276,14 +323,14 @@ impl WriteJournal {
       raw.write_u32_be_at(OFFSETOF_LEN, u32::try_from(len).unwrap());
       let hash = blake3::hash(&raw[usz!(OFFSETOF_LEN)..]);
       raw.write_at(OFFSETOF_HASH, hash.as_bytes());
-      self
-        .device
-        .write_at_with_delayed_sync(once(WriteRequest::new(self.offset, raw)))
-        .await;
+      self.device.write_at(self.offset, raw).await;
 
-      self
-        .device
-        .write_at_with_delayed_sync(writes.drain(..))
+      // Keep semantic order without slowing down to serial writes.
+      let writes_ordered = merge_overlapping_writes(writes);
+      iter(writes_ordered)
+        .for_each_concurrent(None, async |(_, (offset, data))| {
+          self.device.write_at(offset, data).await;
+        })
         .await;
 
       for fut_ctl in fut_ctls.drain(..) {
@@ -296,12 +343,10 @@ impl WriteJournal {
           .remove_if(&offset, |_, e| e.serial_no <= serial_no);
       }
 
-      // We cannot write_at_with_delayed_sync, as we may write to the journal again by then and have a conflict due to reordering.
       self
         .device
         .write_at(self.offset, self.generate_blank_state())
         .await;
-      self.device.sync_data().await;
     }
   }
 }
