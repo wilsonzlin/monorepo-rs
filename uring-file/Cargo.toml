@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Async file I/O via Linux io_uring"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/wilsonzlin/monorepo-rs"
 keywords = ["io_uring", "async", "io", "linux"]
 categories = ["asynchronous", "filesystem"]
 
