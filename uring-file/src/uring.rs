@@ -343,16 +343,16 @@ struct LinkAtRequest {
 pub struct ReadResult<B> {
   /// The buffer containing the data read.
   pub buf: B,
-  /// Number of bytes actually read (may be less than buffer capacity at EOF).
-  pub bytes_read: usize,
+  /// Number of bytes actually read (may be less than buffer capacity at EOF). Limited to ~2GB per operation.
+  pub bytes_read: u32,
 }
 
 /// Result of a write operation: the buffer and actual bytes written.
 pub struct WriteResult<B> {
   /// The original buffer (returned for reuse).
   pub buf: B,
-  /// Number of bytes actually written (may be less than buffer size for non-regular files).
-  pub bytes_written: usize,
+  /// Number of bytes actually written (may be less than buffer size for non-regular files). Limited to ~2GB per operation.
+  pub bytes_written: u32,
 }
 
 // ============================================================================
@@ -362,11 +362,11 @@ pub struct WriteResult<B> {
 enum Message {
   Read {
     req: ReadRequest,
-    res: oneshot::Sender<io::Result<usize>>,
+    res: oneshot::Sender<io::Result<u32>>,
   },
   Write {
     req: WriteRequest,
-    res: oneshot::Sender<io::Result<usize>>,
+    res: oneshot::Sender<io::Result<u32>>,
   },
   Sync {
     req: SyncRequest,
@@ -559,10 +559,10 @@ fn handle_completion(msg: Message, result: i32) {
 
   match msg {
     Message::Read { res, .. } => {
-      let _ = res.send(result.map(|n| n as usize));
+      let _ = res.send(result.map(|n| n as u32));
     }
     Message::Write { res, .. } => {
-      let _ = res.send(result.map(|n| n as usize));
+      let _ = res.send(result.map(|n| n as u32));
     }
     Message::Sync { res, .. } => {
       let _ = res.send(result.map(|_| ()));
@@ -693,8 +693,8 @@ impl Uring {
                   req.buf_ptr,
                   req.buf_len
                 )
-                .offset(req.offset)
-                .build()
+                  .offset(req.offset)
+                  .build()
                 .user_data(id))
               }
               Message::Write { req, .. } => {
@@ -703,7 +703,7 @@ impl Uring {
                   req.buf_ptr,
                   req.buf_len
                 )
-                .offset(req.offset)
+                  .offset(req.offset)
                 .build()
                 .user_data(id))
               }
@@ -789,8 +789,8 @@ impl Uring {
               Message::UnlinkAt { req, .. } => {
                 opcode::UnlinkAt::new(types::Fd(req.dir_fd), req.path.as_ptr())
                   .flags(req.flags)
-                  .build()
-                  .user_data(id)
+                .build()
+                .user_data(id)
               }
               Message::MkdirAt { req, .. } => {
                 opcode::MkDirAt::new(types::Fd(req.dir_fd), req.path.as_ptr())
@@ -912,12 +912,15 @@ impl Uring {
   /// Read into a user-provided buffer. This is the primitive read operation that accepts any buffer type implementing [`IoBufMut`].
   ///
   /// The buffer is returned along with the number of bytes read. This allows buffer reuse and supports custom allocators (e.g., aligned buffers for O_DIRECT).
-  pub async fn read_into<B: IoBufMut>(
+  pub async fn read_into_at<B: IoBufMut>(
     &self,
     file: &impl UringTarget,
-    offset: u64,
+    offset: impl TryInto<u64>,
     mut buf: B,
   ) -> io::Result<ReadResult<B>> {
+    let offset: u64 = offset
+      .try_into()
+      .map_err(|_| io::Error::other("offset exceeds u64::MAX"))?;
     let target = file.as_target(&self.identity);
     let ptr = buf.as_mut_ptr();
     let cap = buf.capacity();
@@ -937,15 +940,18 @@ impl Uring {
 
   /// Read from a file at the specified offset, allocating a buffer internally.
   ///
-  /// This is a convenience wrapper around [`read_into`](Self::read_into) that allocates a `Vec<u8>`. For zero-copy or custom allocators, use `read_into` directly.
+  /// This is a convenience wrapper around [`read_into_at`](Self::read_into_at) that allocates a `Vec<u8>`. For zero-copy or custom allocators, use `read_into_at` directly.
   pub async fn read_at(
     &self,
     file: &impl UringTarget,
-    offset: u64,
-    len: u64,
+    offset: impl TryInto<u64>,
+    len: impl TryInto<u32>,
   ) -> io::Result<ReadResult<Vec<u8>>> {
-    let buf = vec![0u8; len.try_into().unwrap()];
-    self.read_into(file, offset, buf).await
+    let len: u32 = len
+      .try_into()
+      .map_err(|_| io::Error::other("len exceeds u32::MAX"))?;
+    let buf = vec![0u8; len as usize];
+    self.read_into_at(file, offset, buf).await
   }
 
   /// Write a buffer to a file at the specified offset. Accepts any buffer type implementing [`IoBuf`].
@@ -954,9 +960,12 @@ impl Uring {
   pub async fn write_at<B: IoBuf>(
     &self,
     file: &impl UringTarget,
-    offset: u64,
+    offset: impl TryInto<u64>,
     buf: B,
   ) -> io::Result<WriteResult<B>> {
+    let offset: u64 = offset
+      .try_into()
+      .map_err(|_| io::Error::other("offset exceeds u64::MAX"))?;
     let target = file.as_target(&self.identity);
     let ptr = buf.as_ptr();
     let len = buf.len();
@@ -972,6 +981,56 @@ impl Uring {
     });
     let bytes_written = rx.await.expect("uring completion channel dropped")?;
     Ok(WriteResult { buf, bytes_written })
+  }
+
+  /// Read exactly `len` bytes from a file at the specified offset.
+  ///
+  /// Returns an error if fewer bytes are available (e.g., at EOF). This is useful when you know the exact size of data to read and want to fail rather than handle partial reads.
+  pub async fn read_exact_at(
+    &self,
+    file: &impl UringTarget,
+    offset: impl TryInto<u64>,
+    len: impl TryInto<u32>,
+  ) -> io::Result<Vec<u8>> {
+    let len: u32 = len
+      .try_into()
+      .map_err(|_| io::Error::other("len exceeds u32::MAX"))?;
+    let result = self.read_at(file, offset, len).await?;
+    if result.bytes_read < len {
+      return Err(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        format!("expected {} bytes, got {}", len, result.bytes_read),
+      ));
+    }
+    Ok(result.buf)
+  }
+
+  /// Write all bytes to a file at the specified offset.
+  ///
+  /// Loops on short writes until all data is written. Returns an error if a write returns 0 bytes (indicating the write cannot proceed).
+  pub async fn write_all_at(
+    &self,
+    file: &impl UringTarget,
+    offset: impl TryInto<u64>,
+    data: &[u8],
+  ) -> io::Result<()> {
+    let mut offset: u64 = offset
+      .try_into()
+      .map_err(|_| io::Error::other("offset exceeds u64::MAX"))?;
+    let mut written = 0usize;
+    while written < data.len() {
+      let chunk = data[written..].to_vec();
+      let result = self.write_at(file, offset, chunk).await?;
+      if result.bytes_written == 0 {
+        return Err(io::Error::new(
+          io::ErrorKind::WriteZero,
+          "failed to write any bytes",
+        ));
+      }
+      written += result.bytes_written as usize;
+      offset += result.bytes_written as u64;
+    }
+    Ok(())
   }
 
   /// Synchronize file data and metadata to disk (fsync). This ensures that all data and metadata modifications are flushed to the underlying storage device. Even when using direct I/O, this is necessary to ensure the device itself has flushed any internal caches.
@@ -999,7 +1058,7 @@ impl Uring {
         target,
         datasync: true,
       },
-      res: tx,
+        res: tx,
     });
     rx.await.expect("uring completion channel dropped")
   }
@@ -1020,10 +1079,16 @@ impl Uring {
   pub async fn fallocate(
     &self,
     file: &impl UringTarget,
-    offset: u64,
-    len: u64,
+    offset: impl TryInto<u64>,
+    len: impl TryInto<u64>,
     mode: i32,
   ) -> io::Result<()> {
+    let offset: u64 = offset
+      .try_into()
+      .map_err(|_| io::Error::other("offset exceeds u64::MAX"))?;
+    let len: u64 = len
+      .try_into()
+      .map_err(|_| io::Error::other("len exceeds u64::MAX"))?;
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Message::Fallocate {
@@ -1042,10 +1107,16 @@ impl Uring {
   pub async fn fadvise(
     &self,
     file: &impl UringTarget,
-    offset: u64,
-    len: u32,
+    offset: impl TryInto<u64>,
+    len: impl TryInto<u32>,
     advice: i32,
   ) -> io::Result<()> {
+    let offset: u64 = offset
+      .try_into()
+      .map_err(|_| io::Error::other("offset exceeds u64::MAX"))?;
+    let len: u32 = len
+      .try_into()
+      .map_err(|_| io::Error::other("len exceeds u32::MAX"))?;
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Message::Fadvise {
@@ -1061,7 +1132,10 @@ impl Uring {
   }
 
   /// Truncate a file to a specified length (ftruncate). If the file is larger than the specified length, the extra data is lost. If the file is smaller, it is extended and the extended part reads as zeros. Requires Linux 6.9+. On older kernels, this will fail with `EINVAL`.
-  pub async fn ftruncate(&self, file: &impl UringTarget, len: u64) -> io::Result<()> {
+  pub async fn ftruncate(&self, file: &impl UringTarget, len: impl TryInto<u64>) -> io::Result<()> {
+    let len: u64 = len
+      .try_into()
+      .map_err(|_| io::Error::other("len exceeds u64::MAX"))?;
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Message::Ftruncate {
@@ -1110,7 +1184,7 @@ impl Uring {
         flags,
         mode,
       },
-      res: tx,
+        res: tx,
     });
     rx.await.expect("uring completion channel dropped")
   }
@@ -1161,7 +1235,7 @@ impl Uring {
     let (tx, rx) = oneshot::channel();
     self.send(Message::Close {
       req: CloseRequest { fd: raw_fd },
-      res: tx,
+        res: tx,
     });
     rx.await.expect("uring completion channel dropped")
   }
@@ -1292,7 +1366,7 @@ impl Uring {
   ) -> io::Result<()> {
     self
       .hard_link_at(libc::AT_FDCWD, original, libc::AT_FDCWD, link, 0)
-      .await
+    .await
   }
 
   /// Create a hard link relative to directory fds. This is the io_uring equivalent of `linkat(2)`. Requires Linux 5.11+.

@@ -97,8 +97,14 @@ pub trait UringFile: AsRawFd {
   /// Read from the file at the specified offset. Returns the buffer and actual bytes read. The buffer may contain fewer bytes than requested if EOF is reached.
   async fn ur_read_at(&self, offset: u64, len: u64) -> io::Result<ReadResult<Vec<u8>>>;
 
+  /// Read exactly `len` bytes from the file at the specified offset. Returns an error if fewer bytes are available.
+  async fn ur_read_exact_at(&self, offset: u64, len: u64) -> io::Result<Vec<u8>>;
+
   /// Write to the file at the specified offset. Returns the original buffer and bytes written.
   async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult<Vec<u8>>>;
+
+  /// Write all bytes to the file at the specified offset. Loops on short writes until complete.
+  async fn ur_write_all_at(&self, offset: u64, data: &[u8]) -> io::Result<()>;
 
   /// Synchronize file data and metadata to disk (fsync).
   async fn ur_sync(&self) -> io::Result<()>;
@@ -124,8 +130,16 @@ impl UringFile for StdFile {
     DEFAULT_URING.read_at(self, offset, len).await
   }
 
+  async fn ur_read_exact_at(&self, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+    DEFAULT_URING.read_exact_at(self, offset, len).await
+  }
+
   async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult<Vec<u8>>> {
     DEFAULT_URING.write_at(self, offset, data).await
+  }
+
+  async fn ur_write_all_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+    DEFAULT_URING.write_all_at(self, offset, data).await
   }
 
   async fn ur_sync(&self) -> io::Result<()> {
@@ -158,8 +172,16 @@ impl UringFile for TokioFile {
     DEFAULT_URING.read_at(self, offset, len).await
   }
 
+  async fn ur_read_exact_at(&self, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+    DEFAULT_URING.read_exact_at(self, offset, len).await
+  }
+
   async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult<Vec<u8>>> {
     DEFAULT_URING.write_at(self, offset, data).await
+  }
+
+  async fn ur_write_all_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+    DEFAULT_URING.write_all_at(self, offset, data).await
   }
 
   async fn ur_sync(&self) -> io::Result<()> {
