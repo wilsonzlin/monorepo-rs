@@ -37,6 +37,8 @@
 
 use crate::default_uring;
 use crate::metadata::Metadata;
+use crate::uring::URING_LEN_MAX;
+use std::cmp::min;
 use std::io;
 use std::path::Path;
 use tokio::fs::File;
@@ -241,7 +243,7 @@ pub async fn create(path: impl AsRef<Path>) -> io::Result<File> {
 
 /// Read the entire contents of a file into a byte vector.
 ///
-/// This is a convenience function for reading entire files. For large files, consider using `Uring::read_at` with explicit offsets and chunking.
+/// Handles files larger than io_uring's single-operation limit (~2GB) by chunking automatically.
 pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
   let uring = default_uring();
   let fd = uring.open(path.as_ref(), libc::O_RDONLY, 0).await?;
@@ -252,12 +254,28 @@ pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     return Ok(Vec::new());
   }
 
-  uring.read_exact_at(&fd, 0, size).await
+  // For small files, read in one operation
+  if size <= URING_LEN_MAX {
+    return uring.read_exact_at(&fd, 0, size).await;
+  }
+
+  // For large files, read in chunks
+  let mut buf = Vec::with_capacity(size as usize);
+  let mut offset = 0u64;
+  while offset < size {
+    let chunk_size = min(URING_LEN_MAX, size - offset);
+    let chunk = uring.read_exact_at(&fd, offset, chunk_size).await?;
+    buf.extend_from_slice(&chunk);
+    offset += chunk_size;
+  }
+  Ok(buf)
 }
 
 /// Read the entire contents of a file into a string.
 ///
 /// Returns an error if the file contents are not valid UTF-8.
+///
+/// Unlike `std::fs::read_to_string`, this does not handle `io::ErrorKind::Interrupted` because io_uring operations are not interrupted by signals — the kernel completes them asynchronously.
 pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
   let bytes = read(path).await?;
   String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))

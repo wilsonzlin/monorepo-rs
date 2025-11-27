@@ -27,6 +27,7 @@ use io_uring::cqueue::Entry as CEntry;
 use io_uring::opcode;
 use io_uring::squeue::Entry as SEntry;
 use io_uring::types;
+use std::cmp::min;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::io;
@@ -270,7 +271,7 @@ struct FallocateRequest {
 struct FadviseRequest {
   target: Target,
   offset: u64,
-  len: u32,
+  len: i64,
   advice: i32,
 }
 
@@ -693,8 +694,8 @@ impl Uring {
                   req.buf_ptr,
                   req.buf_len
                 )
-                  .offset(req.offset)
-                  .build()
+                .offset(req.offset)
+                .build()
                 .user_data(id))
               }
               Message::Write { req, .. } => {
@@ -703,7 +704,7 @@ impl Uring {
                   req.buf_ptr,
                   req.buf_len
                 )
-                  .offset(req.offset)
+                .offset(req.offset)
                 .build()
                 .user_data(id))
               }
@@ -744,9 +745,7 @@ impl Uring {
               }
               Message::Fadvise { req, .. } => {
                 build_op!(req.target, |fd| opcode::Fadvise::new(
-                  fd,
-                  req.len as i64,
-                  req.advice
+                  fd, req.len, req.advice
                 )
                 .offset(req.offset)
                 .build()
@@ -789,8 +788,8 @@ impl Uring {
               Message::UnlinkAt { req, .. } => {
                 opcode::UnlinkAt::new(types::Fd(req.dir_fd), req.path.as_ptr())
                   .flags(req.flags)
-                .build()
-                .user_data(id)
+                  .build()
+                  .user_data(id)
               }
               Message::MkdirAt { req, .. } => {
                 opcode::MkDirAt::new(types::Fd(req.dir_fd), req.path.as_ptr())
@@ -1019,7 +1018,9 @@ impl Uring {
       .map_err(|_| io::Error::other("offset exceeds u64::MAX"))?;
     let mut written = 0usize;
     while written < data.len() {
-      let chunk = data[written..].to_vec();
+      let remaining = data.len() - written;
+      let chunk_size = min(remaining, URING_LEN_MAX as usize);
+      let chunk = data[written..written + chunk_size].to_vec();
       let result = self.write_at(file, offset, chunk).await?;
       if result.bytes_written == 0 {
         return Err(io::Error::new(
@@ -1058,7 +1059,7 @@ impl Uring {
         target,
         datasync: true,
       },
-        res: tx,
+      res: tx,
     });
     rx.await.expect("uring completion channel dropped")
   }
@@ -1108,15 +1109,18 @@ impl Uring {
     &self,
     file: &impl UringTarget,
     offset: impl TryInto<u64>,
-    len: impl TryInto<u32>,
+    len: impl TryInto<u64>,
     advice: i32,
   ) -> io::Result<()> {
     let offset: u64 = offset
       .try_into()
       .map_err(|_| io::Error::other("offset exceeds u64::MAX"))?;
-    let len: u32 = len
+    let len: u64 = len
       .try_into()
-      .map_err(|_| io::Error::other("len exceeds u32::MAX"))?;
+      .map_err(|_| io::Error::other("len exceeds u64::MAX"))?;
+    let len: i64 = len
+      .try_into()
+      .map_err(|_| io::Error::other("len exceeds i64::MAX"))?;
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Message::Fadvise {
@@ -1184,7 +1188,7 @@ impl Uring {
         flags,
         mode,
       },
-        res: tx,
+      res: tx,
     });
     rx.await.expect("uring completion channel dropped")
   }
@@ -1235,7 +1239,7 @@ impl Uring {
     let (tx, rx) = oneshot::channel();
     self.send(Message::Close {
       req: CloseRequest { fd: raw_fd },
-        res: tx,
+      res: tx,
     });
     rx.await.expect("uring completion channel dropped")
   }
@@ -1366,7 +1370,7 @@ impl Uring {
   ) -> io::Result<()> {
     self
       .hard_link_at(libc::AT_FDCWD, original, libc::AT_FDCWD, link, 0)
-    .await
+      .await
   }
 
   /// Create a hard link relative to directory fds. This is the io_uring equivalent of `linkat(2)`. Requires Linux 5.11+.

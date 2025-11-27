@@ -119,7 +119,7 @@ pub trait UringFile: AsRawFd {
   async fn ur_fallocate(&self, offset: u64, len: u64, mode: i32) -> io::Result<()>;
 
   /// Advise the kernel about file access patterns. Requires Linux 5.6+.
-  async fn ur_fadvise(&self, offset: u64, len: u32, advice: i32) -> io::Result<()>;
+  async fn ur_fadvise(&self, offset: u64, len: u64, advice: i32) -> io::Result<()>;
 
   /// Truncate the file to the specified length. Requires Linux 6.9+.
   async fn ur_ftruncate(&self, len: u64) -> io::Result<()>;
@@ -158,7 +158,7 @@ impl UringFile for StdFile {
     DEFAULT_URING.fallocate(self, offset, len, mode).await
   }
 
-  async fn ur_fadvise(&self, offset: u64, len: u32, advice: i32) -> io::Result<()> {
+  async fn ur_fadvise(&self, offset: u64, len: u64, advice: i32) -> io::Result<()> {
     DEFAULT_URING.fadvise(self, offset, len, advice).await
   }
 
@@ -200,7 +200,7 @@ impl UringFile for TokioFile {
     DEFAULT_URING.fallocate(self, offset, len, mode).await
   }
 
-  async fn ur_fadvise(&self, offset: u64, len: u32, advice: i32) -> io::Result<()> {
+  async fn ur_fadvise(&self, offset: u64, len: u64, advice: i32) -> io::Result<()> {
     DEFAULT_URING.fadvise(self, offset, len, advice).await
   }
 
