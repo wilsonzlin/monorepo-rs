@@ -33,53 +33,114 @@ use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::thread;
 use tokio::sync::oneshot;
+
+// ============================================================================
+// File Target Types
+// ============================================================================
+
+/// Maximum number of files that can be registered with a single Uring instance.
+const MAX_REGISTERED_FILES: u32 = 4096;
+
+/// Internal representation of a file target - either a raw fd or a registered file index.
+#[derive(Clone, Copy)]
+#[doc(hidden)]
+pub enum Target {
+  Fd(RawFd),
+  Fixed { index: u32, raw_fd: RawFd },
+}
+
+/// Trait for types that can be used as file targets in io_uring operations.
+///
+/// This is implemented for all types that implement `AsRawFd` (using unregistered fds) and for `RegisteredFile` (using registered file indices for better performance).
+pub trait UringTarget {
+  #[doc(hidden)]
+  fn as_target(&self, uring_identity: &Arc<()>) -> Target;
+}
+
+impl<T: AsRawFd> UringTarget for T {
+  fn as_target(&self, _uring_identity: &Arc<()>) -> Target {
+    Target::Fd(self.as_raw_fd())
+  }
+}
+
+/// A file registered with a specific `Uring` instance for optimized I/O.
+///
+/// Registered files avoid the overhead of fd lookup on each operation. Create one via [`Uring::register`].
+///
+/// # Performance
+///
+/// Using registered files can significantly reduce per-operation overhead, especially for high-frequency I/O patterns. The kernel maintains a pre-validated reference to the file, avoiding repeated fd table lookups.
+///
+/// # Kernel Requirements
+///
+/// Requires Linux 5.12+ for sparse file registration.
+pub struct RegisteredFile {
+  index: u32,
+  raw_fd: RawFd,
+  uring_identity: Arc<()>,
+}
+
+impl UringTarget for RegisteredFile {
+  fn as_target(&self, uring_identity: &Arc<()>) -> Target {
+    assert!(
+      Arc::ptr_eq(&self.uring_identity, uring_identity),
+      "RegisteredFile used with wrong Uring instance"
+    );
+    Target::Fixed {
+      index: self.index,
+      raw_fd: self.raw_fd,
+    }
+  }
+}
 
 // ============================================================================
 // Request Types
 // ============================================================================
 
 struct ReadRequest {
-  fd: RawFd,
+  target: Target,
   out_buf: Vec<u8>,
   offset: u64,
   len: u32,
 }
 
 struct WriteRequest {
-  fd: RawFd,
+  target: Target,
   offset: u64,
   data: Vec<u8>,
 }
 
 struct SyncRequest {
-  fd: RawFd,
+  target: Target,
   datasync: bool,
 }
 
 struct StatxRequest {
-  fd: RawFd,
+  target: Target,
   /// Caller-allocated buffer for statx result. We use libc::statx for the actual storage, cast to types::statx* for the opcode.
   statx_buf: Box<MaybeUninit<libc::statx>>,
 }
 
 struct FallocateRequest {
-  fd: RawFd,
+  target: Target,
   offset: u64,
   len: u64,
   mode: i32,
 }
 
 struct FadviseRequest {
-  fd: RawFd,
+  target: Target,
   offset: u64,
   len: u32,
   advice: i32,
 }
 
 struct FtruncateRequest {
-  fd: RawFd,
+  target: Target,
   len: u64,
 }
 
@@ -187,7 +248,13 @@ pub struct UringCfg {
 ///     let uring = Uring::new(UringCfg::default())?;
 ///     let file = File::open("test.txt")?;
 ///     
+///     // Option 1: Use file directly (unregistered)
 ///     let result = uring.read_at(&file, 0, 1024).await?;
+///     
+///     // Option 2: Register file for better performance
+///     let registered = uring.register(&file)?;
+///     let result = uring.read_at(&registered, 0, 1024).await?;
+///     
 ///     println!("Read {} bytes", result.bytes_read);
 ///     Ok(())
 /// }
@@ -218,6 +285,41 @@ pub struct UringCfg {
 pub struct Uring {
   // We don't use std::sync::mpsc::Sender as it is not Sync, so it's really complicated to use from any async function.
   sender: crossbeam_channel::Sender<Request>,
+  ring: Arc<IoUring<SEntry, CEntry>>,
+  next_file_slot: Arc<AtomicU32>,
+  identity: Arc<()>,
+}
+
+/// Helper to build a submission entry for either Fd or Fixed target.
+macro_rules! build_op {
+  ($target:expr, | $fd:ident | $op:expr) => {
+    match $target {
+      Target::Fd(raw) => {
+        let $fd = types::Fd(raw);
+        $op
+      }
+      Target::Fixed { index, .. } => {
+        let $fd = types::Fixed(index);
+        $op
+      }
+    }
+  };
+}
+
+/// Helper to build a submission entry that only supports Fd (not Fixed).
+macro_rules! build_op_fd_only {
+  ($target:expr, | $fd:ident | $op:expr) => {
+    match $target {
+      Target::Fd(raw) => {
+        let $fd = types::Fd(raw);
+        $op
+      }
+      Target::Fixed { raw_fd, .. } => {
+        let $fd = types::Fd(raw_fd);
+        $op
+      }
+    }
+  };
 }
 
 /// Process a completion entry and dispatch the result.
@@ -299,6 +401,10 @@ impl Uring {
       };
       builder.build(RING_SIZE)?
     };
+
+    // Pre-allocate sparse file table for registration (Linux 5.12+). If this fails, file registration won't work but unregistered fds will still function.
+    let _ = ring.submitter().register_files_sparse(MAX_REGISTERED_FILES);
+
     let ring = Arc::new(ring);
 
     // Submission thread.
@@ -332,25 +438,27 @@ impl Uring {
               Request::Read { req, .. } => {
                 // SAFETY: We're using `as_ptr()` to get a pointer to the buffer. The buffer is owned by the Request and will live until the completion is processed.
                 let ptr = req.out_buf.as_ptr() as *mut u8;
-                opcode::Read::new(types::Fd(req.fd), ptr, req.len)
+                build_op!(req.target, |fd| opcode::Read::new(fd, ptr, req.len)
                   .offset(req.offset)
                   .build()
-                  .user_data(id)
+                  .user_data(id))
               }
               Request::Write { req, .. } => {
                 let ptr = req.data.as_ptr();
                 let len: u32 = req.data.len().try_into().unwrap();
-                opcode::Write::new(types::Fd(req.fd), ptr, len)
+                build_op!(req.target, |fd| opcode::Write::new(fd, ptr, len)
                   .offset(req.offset)
                   .build()
-                  .user_data(id)
+                  .user_data(id))
               }
               Request::Sync { req, .. } => {
-                let mut fsync = opcode::Fsync::new(types::Fd(req.fd));
-                if req.datasync {
-                  fsync = fsync.flags(types::FsyncFlags::DATASYNC);
-                }
-                fsync.build().user_data(id)
+                build_op!(req.target, |fd| {
+                  let mut fsync = opcode::Fsync::new(fd);
+                  if req.datasync {
+                    fsync = fsync.flags(types::FsyncFlags::DATASYNC);
+                  }
+                  fsync.build().user_data(id)
+                })
               }
               Request::Statx { req, .. } => {
                 const STATX_BASIC_STATS: u32 = 0x000007ff; // STATX_BASIC_STATS requests the basic stat fields
@@ -360,26 +468,39 @@ impl Uring {
                 // Cast libc::statx* to types::statx* - the opcode uses an opaque type but the kernel writes the actual statx struct
                 let statx_ptr = req.statx_buf.as_ptr() as *mut types::statx;
 
-                opcode::Statx::new(types::Fd(req.fd), EMPTY_PATH.as_ptr(), statx_ptr)
-                  .flags(AT_EMPTY_PATH)
-                  .mask(STATX_BASIC_STATS)
-                  .build()
-                  .user_data(id)
-              }
-              Request::Fallocate { req, .. } => opcode::Fallocate::new(types::Fd(req.fd), req.len)
-                .offset(req.offset)
-                .mode(req.mode)
+                // Note: Statx doesn't support Fixed in the io-uring crate, so we fall back to raw fd
+                build_op_fd_only!(req.target, |fd| opcode::Statx::new(
+                  fd,
+                  EMPTY_PATH.as_ptr(),
+                  statx_ptr
+                )
+                .flags(AT_EMPTY_PATH)
+                .mask(STATX_BASIC_STATS)
                 .build()
-                .user_data(id),
-              Request::Fadvise { req, .. } => {
-                opcode::Fadvise::new(types::Fd(req.fd), req.len as i64, req.advice)
+                .user_data(id))
+              }
+              Request::Fallocate { req, .. } => {
+                build_op!(req.target, |fd| opcode::Fallocate::new(fd, req.len)
                   .offset(req.offset)
+                  .mode(req.mode)
                   .build()
-                  .user_data(id)
+                  .user_data(id))
               }
-              Request::Ftruncate { req, .. } => opcode::Ftruncate::new(types::Fd(req.fd), req.len)
+              Request::Fadvise { req, .. } => {
+                build_op!(req.target, |fd| opcode::Fadvise::new(
+                  fd,
+                  req.len as i64,
+                  req.advice
+                )
+                .offset(req.offset)
                 .build()
-                .user_data(id),
+                .user_data(id))
+              }
+              Request::Ftruncate { req, .. } => {
+                build_op!(req.target, |fd| opcode::Ftruncate::new(fd, req.len)
+                  .build()
+                  .user_data(id))
+              }
             };
 
             // Insert before submitting so the completion handler can find it.
@@ -431,7 +552,45 @@ impl Uring {
       }
     });
 
-    Ok(Self { sender })
+    Ok(Self {
+      sender,
+      ring,
+      next_file_slot: Arc::new(AtomicU32::new(0)),
+      identity: Arc::new(()),
+    })
+  }
+
+  /// Register a file for optimized I/O operations.
+  ///
+  /// Registered files use kernel-side file references, avoiding fd table lookups on each operation. This can significantly improve performance for high-frequency I/O.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the maximum number of registered files has been reached, or if file registration fails (e.g., kernel too old).
+  ///
+  /// # Kernel Requirements
+  ///
+  /// Requires Linux 5.12+ for sparse file registration.
+  pub fn register(&self, file: &impl AsRawFd) -> io::Result<RegisteredFile> {
+    let raw_fd = file.as_raw_fd();
+    let slot = self.next_file_slot.fetch_add(1, Ordering::SeqCst);
+    if slot >= MAX_REGISTERED_FILES {
+      return Err(io::Error::new(
+        io::ErrorKind::Other,
+        "maximum registered files exceeded",
+      ));
+    }
+
+    self
+      .ring
+      .submitter()
+      .register_files_update(slot, &[raw_fd])?;
+
+    Ok(RegisteredFile {
+      index: slot,
+      raw_fd,
+      uring_identity: self.identity.clone(),
+    })
   }
 
   /// Send a request to the submission thread.
@@ -442,15 +601,16 @@ impl Uring {
   /// Read from a file at the specified offset. Returns the buffer and the number of bytes actually read. The number of bytes read may be less than requested if the file is smaller or if EOF is reached.
   pub async fn read_at(
     &self,
-    file: &impl AsRawFd,
+    file: &impl UringTarget,
     offset: u64,
     len: u64,
   ) -> io::Result<ReadResult> {
+    let target = file.as_target(&self.identity);
     let out_buf = vec![0u8; len.try_into().unwrap()];
     let (tx, rx) = oneshot::channel();
     self.send(Request::Read {
       req: ReadRequest {
-        fd: file.as_raw_fd(),
+        target,
         out_buf,
         offset,
         len: len.try_into().unwrap(),
@@ -463,14 +623,15 @@ impl Uring {
   /// Write to a file at the specified offset. Returns the original buffer and number of bytes written. For regular files, `bytes_written` will typically equal `data.len()`. For pipes, sockets, etc., short writes are possible and normal.
   pub async fn write_at(
     &self,
-    file: &impl AsRawFd,
+    file: &impl UringTarget,
     offset: u64,
     data: Vec<u8>,
   ) -> io::Result<WriteResult> {
+    let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Request::Write {
       req: WriteRequest {
-        fd: file.as_raw_fd(),
+        target,
         offset,
         data,
       },
@@ -482,11 +643,12 @@ impl Uring {
   /// Synchronize file data and metadata to disk (fsync). This ensures that all data and metadata modifications are flushed to the underlying storage device. Even when using direct I/O, this is necessary to ensure the device itself has flushed any internal caches.
   ///
   /// **Note on ordering**: io_uring does not guarantee ordering between operations. If you need to ensure writes complete before fsync, you should await the write first, then call fsync.
-  pub async fn sync(&self, file: &impl AsRawFd) -> io::Result<()> {
+  pub async fn sync(&self, file: &impl UringTarget) -> io::Result<()> {
+    let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Request::Sync {
       req: SyncRequest {
-        fd: file.as_raw_fd(),
+        target,
         datasync: false,
       },
       res: tx,
@@ -495,11 +657,12 @@ impl Uring {
   }
 
   /// Synchronize file data to disk (fdatasync). Like [`sync`](Self::sync), but only flushes data, not metadata (unless the metadata is required to retrieve the data). This can be faster than a full fsync.
-  pub async fn datasync(&self, file: &impl AsRawFd) -> io::Result<()> {
+  pub async fn datasync(&self, file: &impl UringTarget) -> io::Result<()> {
+    let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Request::Sync {
       req: SyncRequest {
-        fd: file.as_raw_fd(),
+        target,
         datasync: true,
       },
       res: tx,
@@ -508,15 +671,13 @@ impl Uring {
   }
 
   /// Get file status information (statx). This is the io_uring equivalent of `fstat`/`statx`. It returns metadata about the file including size, permissions, timestamps, etc. Requires Linux 5.6+. On older kernels, this will fail with `EINVAL`.
-  pub async fn statx(&self, file: &impl AsRawFd) -> io::Result<Metadata> {
+  pub async fn statx(&self, file: &impl UringTarget) -> io::Result<Metadata> {
+    let target = file.as_target(&self.identity);
     // Allocate buffer for the kernel to write statx result
     let statx_buf = Box::new(MaybeUninit::<libc::statx>::uninit());
     let (tx, rx) = oneshot::channel();
     self.send(Request::Statx {
-      req: StatxRequest {
-        fd: file.as_raw_fd(),
-        statx_buf,
-      },
+      req: StatxRequest { target, statx_buf },
       res: tx,
     });
     rx.await.expect("uring completion channel dropped")
@@ -525,15 +686,16 @@ impl Uring {
   /// Pre-allocate or deallocate space for a file (fallocate). This can be used to pre-allocate space to avoid fragmentation, punch holes in sparse files, or zero-fill regions. See [`falloc`] module for mode flags. Requires Linux 5.6+.
   pub async fn fallocate(
     &self,
-    file: &impl AsRawFd,
+    file: &impl UringTarget,
     offset: u64,
     len: u64,
     mode: i32,
   ) -> io::Result<()> {
+    let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Request::Fallocate {
       req: FallocateRequest {
-        fd: file.as_raw_fd(),
+        target,
         offset,
         len,
         mode,
@@ -546,15 +708,16 @@ impl Uring {
   /// Advise the kernel about expected file access patterns (fadvise). This is a hint to the kernel about how you intend to access a file region. The kernel may use this to optimize readahead, caching, etc. See [`advice`] module for advice values. Requires Linux 5.6+.
   pub async fn fadvise(
     &self,
-    file: &impl AsRawFd,
+    file: &impl UringTarget,
     offset: u64,
     len: u32,
     advice: i32,
   ) -> io::Result<()> {
+    let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Request::Fadvise {
       req: FadviseRequest {
-        fd: file.as_raw_fd(),
+        target,
         offset,
         len,
         advice,
@@ -565,13 +728,11 @@ impl Uring {
   }
 
   /// Truncate a file to a specified length (ftruncate). If the file is larger than the specified length, the extra data is lost. If the file is smaller, it is extended and the extended part reads as zeros. Requires Linux 6.9+. On older kernels, this will fail with `EINVAL`.
-  pub async fn ftruncate(&self, file: &impl AsRawFd, len: u64) -> io::Result<()> {
+  pub async fn ftruncate(&self, file: &impl UringTarget, len: u64) -> io::Result<()> {
+    let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
     self.send(Request::Ftruncate {
-      req: FtruncateRequest {
-        fd: file.as_raw_fd(),
-        len,
-      },
+      req: FtruncateRequest { target, len },
       res: tx,
     });
     rx.await.expect("uring completion channel dropped")
