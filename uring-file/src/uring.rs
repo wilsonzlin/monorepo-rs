@@ -777,17 +777,15 @@ impl Uring {
               Message::Close { req, .. } => {
                 opcode::Close::new(types::Fd(req.fd)).build().user_data(id)
               }
-              Message::RenameAt { req, .. } => {
-                opcode::RenameAt::new(
-                  types::Fd(req.old_dir_fd),
-                  req.old_path.as_ptr(),
-                  types::Fd(req.new_dir_fd),
-                  req.new_path.as_ptr(),
-                )
-                .flags(req.flags)
-                .build()
-                .user_data(id)
-              }
+              Message::RenameAt { req, .. } => opcode::RenameAt::new(
+                types::Fd(req.old_dir_fd),
+                req.old_path.as_ptr(),
+                types::Fd(req.new_dir_fd),
+                req.new_path.as_ptr(),
+              )
+              .flags(req.flags)
+              .build()
+              .user_data(id),
               Message::UnlinkAt { req, .. } => {
                 opcode::UnlinkAt::new(types::Fd(req.dir_fd), req.path.as_ptr())
                   .flags(req.flags)
@@ -800,26 +798,22 @@ impl Uring {
                   .build()
                   .user_data(id)
               }
-              Message::SymlinkAt { req, .. } => {
-                opcode::SymlinkAt::new(
-                  types::Fd(req.new_dir_fd),
-                  req.target.as_ptr(),
-                  req.link_path.as_ptr(),
-                )
-                .build()
-                .user_data(id)
-              }
-              Message::LinkAt { req, .. } => {
-                opcode::LinkAt::new(
-                  types::Fd(req.old_dir_fd),
-                  req.old_path.as_ptr(),
-                  types::Fd(req.new_dir_fd),
-                  req.new_path.as_ptr(),
-                )
-                .flags(req.flags)
-                .build()
-                .user_data(id)
-              }
+              Message::SymlinkAt { req, .. } => opcode::SymlinkAt::new(
+                types::Fd(req.new_dir_fd),
+                req.target.as_ptr(),
+                req.link_path.as_ptr(),
+              )
+              .build()
+              .user_data(id),
+              Message::LinkAt { req, .. } => opcode::LinkAt::new(
+                types::Fd(req.old_dir_fd),
+                req.old_path.as_ptr(),
+                types::Fd(req.new_dir_fd),
+                req.new_path.as_ptr(),
+              )
+              .flags(req.flags)
+              .build()
+              .user_data(id),
             };
 
             // Insert before submitting so the completion handler can find it.
@@ -1217,7 +1211,9 @@ impl Uring {
 
   /// Delete a directory. This is the io_uring equivalent of `rmdir(2)`. Requires Linux 5.11+.
   pub async fn rmdir(&self, path: impl AsRef<Path>) -> io::Result<()> {
-    self.unlink_at(libc::AT_FDCWD, path, libc::AT_REMOVEDIR).await
+    self
+      .unlink_at(libc::AT_FDCWD, path, libc::AT_REMOVEDIR)
+      .await
   }
 
   /// Delete a file or directory relative to a directory fd. This is the io_uring equivalent of `unlinkat(2)`. Requires Linux 5.11+.
@@ -1232,7 +1228,11 @@ impl Uring {
     let path = path_to_cstring(path.as_ref())?;
     let (tx, rx) = oneshot::channel();
     self.send(Message::UnlinkAt {
-      req: UnlinkAtRequest { dir_fd, path, flags },
+      req: UnlinkAtRequest {
+        dir_fd,
+        path,
+        flags,
+      },
       res: tx,
     });
     rx.await.expect("uring completion channel dropped")
@@ -1244,12 +1244,7 @@ impl Uring {
   }
 
   /// Create a directory relative to a directory fd. This is the io_uring equivalent of `mkdirat(2)`. Requires Linux 5.15+.
-  pub async fn mkdir_at(
-    &self,
-    dir_fd: RawFd,
-    path: impl AsRef<Path>,
-    mode: u32,
-  ) -> io::Result<()> {
+  pub async fn mkdir_at(&self, dir_fd: RawFd, path: impl AsRef<Path>, mode: u32) -> io::Result<()> {
     let path = path_to_cstring(path.as_ref())?;
     let (tx, rx) = oneshot::channel();
     self.send(Message::MkdirAt {

@@ -216,11 +216,14 @@ pub async fn truncate(path: impl AsRef<Path>, len: u64) -> io::Result<()> {
 pub async fn append(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
   let uring = default_uring();
   let fd = uring
-    .open(path.as_ref(), libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o644)
+    .open(
+      path.as_ref(),
+      libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+      0o644,
+    )
     .await?;
   let data = contents.as_ref().to_vec();
   // With O_APPEND, the offset is ignored - kernel always writes at end
   uring.write_at(&fd, 0, data).await?;
   Ok(())
 }
-
