@@ -83,6 +83,13 @@ fs::copy(src, dst).await?;                // -> bytes copied
 let file = fs::open(path).await?;         // read-only
 let file = fs::create(path).await?;       // write, create/truncate
 
+// OpenOptions for more control
+let file = fs::OpenOptions::new()
+    .read(true)
+    .write(true)
+    .create(true)
+    .open(path).await?;
+
 // Directories
 fs::create_dir(path).await?;
 fs::create_dir_all(path).await?;

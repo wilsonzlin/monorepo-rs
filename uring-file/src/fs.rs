@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use uring_file::fs;
+//! use uring_file::fs::{self, OpenOptions};
 //!
 //! #[tokio::main]
 //! async fn main() -> std::io::Result<()> {
@@ -16,6 +16,14 @@
 //!
 //!     // Write to file
 //!     fs::write("/tmp/hello.txt", b"Hello, world!").await?;
+//!
+//!     // Open with options
+//!     let file = OpenOptions::new()
+//!         .read(true)
+//!         .write(true)
+//!         .create(true)
+//!         .open("/tmp/data.bin")
+//!         .await?;
 //!
 //!     // Create directory tree
 //!     fs::create_dir_all("/tmp/a/b/c").await?;
@@ -32,6 +40,186 @@ use crate::metadata::Metadata;
 use std::io;
 use std::path::Path;
 use tokio::fs::File;
+
+/// Options for opening files, mirroring `std::fs::OpenOptions`.
+///
+/// # Example
+///
+/// ```ignore
+/// use uring_file::fs::OpenOptions;
+///
+/// // Open for reading
+/// let file = OpenOptions::new().read(true).open("foo.txt").await?;
+///
+/// // Create for writing
+/// let file = OpenOptions::new()
+///     .write(true)
+///     .create(true)
+///     .truncate(true)
+///     .open("bar.txt")
+///     .await?;
+///
+/// // Append to existing
+/// let file = OpenOptions::new()
+///     .append(true)
+///     .open("log.txt")
+///     .await?;
+///
+/// // Create new (fails if exists)
+/// let file = OpenOptions::new()
+///     .write(true)
+///     .create_new(true)
+///     .open("new.txt")
+///     .await?;
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct OpenOptions {
+  read: bool,
+  write: bool,
+  append: bool,
+  truncate: bool,
+  create: bool,
+  create_new: bool,
+  mode: Option<u32>,
+  custom_flags: i32,
+}
+
+impl OpenOptions {
+  /// Creates a blank new set of options.
+  ///
+  /// All options are initially set to `false`.
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  /// Sets read access.
+  pub fn read(&mut self, read: bool) -> &mut Self {
+    self.read = read;
+    self
+  }
+
+  /// Sets write access.
+  pub fn write(&mut self, write: bool) -> &mut Self {
+    self.write = write;
+    self
+  }
+
+  /// Sets append mode.
+  ///
+  /// Writes will append to the file instead of overwriting.
+  /// Implies `write(true)`.
+  pub fn append(&mut self, append: bool) -> &mut Self {
+    self.append = append;
+    self
+  }
+
+  /// Sets truncate mode.
+  ///
+  /// If the file exists, it will be truncated to zero length.
+  /// Requires `write(true)`.
+  pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+    self.truncate = truncate;
+    self
+  }
+
+  /// Sets create mode.
+  ///
+  /// Creates the file if it doesn't exist. Requires `write(true)` or `append(true)`.
+  pub fn create(&mut self, create: bool) -> &mut Self {
+    self.create = create;
+    self
+  }
+
+  /// Sets create-new mode.
+  ///
+  /// Creates a new file, failing if it already exists.
+  /// Implies `create(true)` and requires `write(true)`.
+  pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+    self.create_new = create_new;
+    self
+  }
+
+  /// Sets the file mode (permissions) for newly created files.
+  ///
+  /// Default is `0o644`.
+  pub fn mode(&mut self, mode: u32) -> &mut Self {
+    self.mode = Some(mode);
+    self
+  }
+
+  /// Sets custom flags to pass to the underlying `open` syscall.
+  ///
+  /// This allows flags like `O_DIRECT`, `O_SYNC`, `O_NOFOLLOW`, `O_CLOEXEC`, etc.
+  /// The flags are OR'd with the flags derived from other options.
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// let file = OpenOptions::new()
+  ///     .read(true)
+  ///     .write(true)
+  ///     .create(true)
+  ///     .custom_flags(libc::O_DIRECT | libc::O_SYNC)
+  ///     .open("data.bin")
+  ///     .await?;
+  /// ```
+  pub fn custom_flags(&mut self, flags: i32) -> &mut Self {
+    self.custom_flags = flags;
+    self
+  }
+
+  /// Opens a file with the configured options.
+  ///
+  /// Returns a `tokio::fs::File` for async operations.
+  pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
+    let flags = self.to_flags()?;
+    let mode = self.mode.unwrap_or(0o644);
+    let fd = default_uring().open(path, flags, mode).await?;
+    Ok(File::from_std(std::fs::File::from(fd)))
+  }
+
+  fn to_flags(&self) -> io::Result<i32> {
+    // Validate options (matches std::fs::OpenOptions behavior)
+    if self.append && self.truncate {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "cannot combine append and truncate",
+      ));
+    }
+
+    // Build flags
+    let mut flags = self.custom_flags;
+
+    // Access mode: determine O_RDONLY, O_WRONLY, or O_RDWR
+    let has_write = self.write || self.append;
+    if self.read && has_write {
+      flags |= libc::O_RDWR;
+    } else if self.read {
+      flags |= libc::O_RDONLY;
+    } else if has_write {
+      flags |= libc::O_WRONLY;
+    } else {
+      // Match std behavior: default to read-only if nothing specified
+      flags |= libc::O_RDONLY;
+    }
+
+    if self.append {
+      flags |= libc::O_APPEND;
+    }
+
+    if self.truncate {
+      flags |= libc::O_TRUNC;
+    }
+
+    if self.create_new {
+      flags |= libc::O_CREAT | libc::O_EXCL;
+    } else if self.create {
+      flags |= libc::O_CREAT;
+    }
+
+    Ok(flags)
+  }
+}
 
 /// Open a file in read-only mode.
 ///
