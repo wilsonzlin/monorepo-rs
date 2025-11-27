@@ -67,7 +67,10 @@ use std::fs::File as StdFile;
 use std::io;
 use std::os::fd::AsRawFd;
 use tokio::fs::File as TokioFile;
-use uring::{ReadResult, Uring, UringCfg, WriteResult};
+use uring::ReadResult;
+use uring::Uring;
+use uring::UringCfg;
+use uring::WriteResult;
 
 // ============================================================================
 // Global Default Ring

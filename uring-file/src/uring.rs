@@ -22,11 +22,11 @@
 
 use crate::metadata::Metadata;
 use dashmap::DashMap;
+use io_uring::IoUring;
 use io_uring::cqueue::Entry as CEntry;
 use io_uring::opcode;
 use io_uring::squeue::Entry as SEntry;
 use io_uring::types;
-use io_uring::IoUring;
 use std::collections::VecDeque;
 use std::io;
 use std::mem::MaybeUninit;
@@ -423,7 +423,9 @@ impl Uring {
           };
 
           let id = e.user_data();
-          let (_, req) = pending.remove(&id).expect("completion for unknown request id");
+          let (_, req) = pending
+            .remove(&id)
+            .expect("completion for unknown request id");
           handle_completion(req, e.result());
         }
       }
@@ -438,7 +440,12 @@ impl Uring {
   }
 
   /// Read from a file at the specified offset. Returns the buffer and the number of bytes actually read. The number of bytes read may be less than requested if the file is smaller or if EOF is reached.
-  pub async fn read_at(&self, file: &impl AsRawFd, offset: u64, len: u64) -> io::Result<ReadResult> {
+  pub async fn read_at(
+    &self,
+    file: &impl AsRawFd,
+    offset: u64,
+    len: u64,
+  ) -> io::Result<ReadResult> {
     let out_buf = vec![0u8; len.try_into().unwrap()];
     let (tx, rx) = oneshot::channel();
     self.send(Request::Read {

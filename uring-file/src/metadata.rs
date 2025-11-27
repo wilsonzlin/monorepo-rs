@@ -2,7 +2,9 @@
 
 use std::fmt;
 use std::io;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 /// File metadata returned by statx. Provides an interface compatible with [`std::fs::Metadata`] and [`std::os::unix::fs::MetadataExt`].
 pub struct Metadata(pub(crate) libc::statx);

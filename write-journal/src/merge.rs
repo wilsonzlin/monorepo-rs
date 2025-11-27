@@ -186,11 +186,7 @@ mod tests {
       (2, vec![7, 8]), // [2..4) overlaps previous
     ];
     let merged = merge_overlapping_writes(writes);
-    assert_intervals(&merged, &[
-      (0, vec![1]),
-      (1, vec![5]),
-      (2, vec![7, 8]),
-    ]);
+    assert_intervals(&merged, &[(0, vec![1]), (1, vec![5]), (2, vec![7, 8])]);
   }
 
   #[test]
