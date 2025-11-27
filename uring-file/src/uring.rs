@@ -50,6 +50,107 @@ pub const URING_LEN_MAX: u64 = 2 * 1024 * 1024 * 1024 - 4096;
 /// Maximum number of files that can be registered with a single Uring instance.
 const MAX_REGISTERED_FILES: u32 = 4096;
 
+// ============================================================================
+// Buffer Traits
+// ============================================================================
+
+// We define custom buffer traits rather than using `Vec<u8>` or `Box<[u8]>` directly because:
+//
+// 1. **Aligned allocations**: O_DIRECT requires sector-aligned buffers (typically 512 or 4096 bytes).
+//    `Vec<u8>` only guarantees pointer alignment, not allocation alignment. Custom allocators
+//    can provide properly aligned buffers that implement these traits.
+//
+// 2. **Buffer pools**: High-performance applications reuse buffers to avoid allocation overhead.
+//    Pool-managed buffers can implement these traits directly without conversion.
+//
+// 3. **Specialized memory**: GPU memory, mmap'd regions, or other exotic buffer types can
+//    participate in io_uring operations by implementing these traits.
+//
+// 4. **Zero-copy**: Accepting generic buffers avoids the need to copy data into/out of
+//    a library-owned buffer type.
+//
+// The traits are `unsafe` because implementors must guarantee pointer stability across moves,
+// which is automatically true for heap allocations but NOT for stack arrays.
+
+/// A buffer that can be used for io_uring write operations.
+///
+/// # Safety
+///
+/// Implementors must guarantee that:
+/// - The pointer returned by `as_ptr()` remains valid and at a stable address until the I/O operation completes, even if `self` is moved.
+/// - This is automatically satisfied for heap-allocated buffers (`Vec<u8>`, `Box<[u8]>`, etc.) but NOT for stack-allocated arrays.
+pub unsafe trait IoBuf: Send + 'static {
+  /// Returns a pointer to the buffer's data.
+  fn as_ptr(&self) -> *const u8;
+  /// Returns the number of initialized bytes in the buffer.
+  fn len(&self) -> usize;
+  /// Returns true if the buffer is empty.
+  fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+}
+
+/// A buffer that can be used for io_uring read operations.
+///
+/// # Safety
+///
+/// Implementors must guarantee that:
+/// - The pointer returned by `as_mut_ptr()` remains valid and at a stable address until the I/O operation completes, even if `self` is moved.
+/// - This is automatically satisfied for heap-allocated buffers (`Vec<u8>`, `Box<[u8]>`, etc.) but NOT for stack-allocated arrays.
+pub unsafe trait IoBufMut: Send + 'static {
+  /// Returns a mutable pointer to the buffer's data.
+  fn as_mut_ptr(&mut self) -> *mut u8;
+  /// Returns the buffer's total capacity (maximum bytes that can be read into it).
+  fn capacity(&self) -> usize;
+}
+
+// Implementations for Vec<u8>
+unsafe impl IoBuf for Vec<u8> {
+  fn as_ptr(&self) -> *const u8 {
+    Vec::as_ptr(self)
+  }
+
+  fn len(&self) -> usize {
+    Vec::len(self)
+  }
+}
+
+unsafe impl IoBufMut for Vec<u8> {
+  fn as_mut_ptr(&mut self) -> *mut u8 {
+    Vec::as_mut_ptr(self)
+  }
+
+  fn capacity(&self) -> usize {
+    Vec::capacity(self)
+  }
+}
+
+// Implementations for Box<[u8]>
+unsafe impl IoBuf for Box<[u8]> {
+  fn as_ptr(&self) -> *const u8 {
+    <[u8]>::as_ptr(self)
+  }
+
+  fn len(&self) -> usize {
+    <[u8]>::len(self)
+  }
+}
+
+unsafe impl IoBufMut for Box<[u8]> {
+  fn as_mut_ptr(&mut self) -> *mut u8 {
+    <[u8]>::as_mut_ptr(self)
+  }
+
+  fn capacity(&self) -> usize {
+    // Box<[u8]> has fixed size, capacity == len
+    <[u8]>::len(self)
+  }
+}
+
+// ============================================================================
+// File Target Types
+// ============================================================================
+
 /// Internal representation of a file target - either a raw fd or a registered file index.
 #[derive(Clone, Copy)]
 #[doc(hidden)]
@@ -103,21 +204,30 @@ impl UringTarget for RegisteredFile {
 }
 
 // ============================================================================
-// Request Types
+// Internal Request Types (just pointers, caller owns the buffer)
 // ============================================================================
 
 struct ReadRequest {
   target: Target,
-  out_buf: Vec<u8>,
+  buf_ptr: *mut u8,
+  buf_len: u32,
   offset: u64,
-  len: u32,
 }
+
+// SAFETY: The pointer is to heap-allocated memory owned by the caller's future, which awaits completion. The pointer is only dereferenced by the kernel, not by our threads.
+unsafe impl Send for ReadRequest {}
+unsafe impl Sync for ReadRequest {}
 
 struct WriteRequest {
   target: Target,
+  buf_ptr: *const u8,
+  buf_len: u32,
   offset: u64,
-  data: Vec<u8>,
 }
+
+// SAFETY: The pointer is to heap-allocated memory owned by the caller's future, which awaits completion. The pointer is only dereferenced by the kernel, not by our threads.
+unsafe impl Send for WriteRequest {}
+unsafe impl Sync for WriteRequest {}
 
 struct SyncRequest {
   target: Target,
@@ -154,17 +264,17 @@ struct FtruncateRequest {
 // ============================================================================
 
 /// Result of a read operation: the buffer and actual bytes read.
-pub struct ReadResult {
+pub struct ReadResult<B> {
   /// The buffer containing the data read.
-  pub buf: Vec<u8>,
-  /// Number of bytes actually read (may be less than buffer size at EOF).
+  pub buf: B,
+  /// Number of bytes actually read (may be less than buffer capacity at EOF).
   pub bytes_read: usize,
 }
 
 /// Result of a write operation: the buffer and actual bytes written.
-pub struct WriteResult {
+pub struct WriteResult<B> {
   /// The original buffer (returned for reuse).
-  pub buf: Vec<u8>,
+  pub buf: B,
   /// Number of bytes actually written (may be less than buffer size for non-regular files).
   pub bytes_written: usize,
 }
@@ -173,14 +283,14 @@ pub struct WriteResult {
 // Request Enum
 // ============================================================================
 
-enum Request {
+enum Message {
   Read {
     req: ReadRequest,
-    res: oneshot::Sender<io::Result<ReadResult>>,
+    res: oneshot::Sender<io::Result<usize>>,
   },
   Write {
     req: WriteRequest,
-    res: oneshot::Sender<io::Result<WriteResult>>,
+    res: oneshot::Sender<io::Result<usize>>,
   },
   Sync {
     req: SyncRequest,
@@ -253,10 +363,14 @@ pub struct UringCfg {
 ///     let uring = Uring::new(UringCfg::default())?;
 ///     let file = File::open("test.txt")?;
 ///     
-///     // Option 1: Use file directly (unregistered)
+///     // Read with library-allocated buffer
 ///     let result = uring.read_at(&file, 0, 1024).await?;
 ///     
-///     // Option 2: Register file for better performance
+///     // Read into user-provided buffer (zero-copy for custom allocators)
+///     let buf = vec![0u8; 1024];
+///     let result = uring.read_into(&file, 0, buf).await?;
+///     
+///     // Register file for reduced per-operation overhead
 ///     let registered = uring.register(&file)?;
 ///     let result = uring.read_at(&registered, 0, 1024).await?;
 ///     
@@ -289,7 +403,7 @@ pub struct UringCfg {
 #[derive(Clone)]
 pub struct Uring {
   // We don't use std::sync::mpsc::Sender as it is not Sync, so it's really complicated to use from any async function.
-  sender: crossbeam_channel::Sender<Request>,
+  sender: crossbeam_channel::Sender<Message>,
   ring: Arc<IoUring<SEntry, CEntry>>,
   next_file_slot: Arc<AtomicU32>,
   identity: Arc<()>,
@@ -328,46 +442,38 @@ macro_rules! build_op_fd_only {
 }
 
 /// Process a completion entry and dispatch the result.
-fn handle_completion(req: Request, result: i32) {
+fn handle_completion(msg: Message, result: i32) {
   let result: io::Result<i32> = if result < 0 {
     Err(io::Error::from_raw_os_error(-result))
   } else {
     Ok(result)
   };
 
-  match req {
-    Request::Read { req, res } => {
-      let outcome = result.map(|n| ReadResult {
-        buf: req.out_buf,
-        bytes_read: n as usize,
-      });
-      let _ = res.send(outcome);
+  match msg {
+    Message::Read { res, .. } => {
+      let _ = res.send(result.map(|n| n as usize));
     }
-    Request::Write { req, res } => {
-      let outcome = result.map(|n| WriteResult {
-        buf: req.data,
-        bytes_written: n as usize,
-      });
-      let _ = res.send(outcome);
+    Message::Write { res, .. } => {
+      let _ = res.send(result.map(|n| n as usize));
     }
-    Request::Sync { res, .. } => {
+    Message::Sync { res, .. } => {
       let _ = res.send(result.map(|_| ()));
     }
-    Request::Statx { req, res } => {
+    Message::Statx { req, res } => {
       let outcome = result.map(|_| {
-        // SAFETY: The kernel has written the statx structure to this buffer
+        // SAFETY: The kernel has initialized the statx buffer
         let statx = unsafe { (*req.statx_buf).assume_init() };
         Metadata(statx)
       });
       let _ = res.send(outcome);
     }
-    Request::Fallocate { res, .. } => {
+    Message::Fallocate { res, .. } => {
       let _ = res.send(result.map(|_| ()));
     }
-    Request::Fadvise { res, .. } => {
+    Message::Fadvise { res, .. } => {
       let _ = res.send(result.map(|_| ()));
     }
-    Request::Ftruncate { res, .. } => {
+    Message::Ftruncate { res, .. } => {
       let _ = res.send(result.map(|_| ()));
     }
   }
@@ -382,8 +488,8 @@ impl Uring {
   ///
   /// Returns an error if the io_uring cannot be created (e.g., kernel too old, resource limits exceeded, or insufficient permissions).
   pub fn new(cfg: UringCfg) -> io::Result<Self> {
-    let (sender, receiver) = crossbeam_channel::unbounded::<Request>();
-    let pending: Arc<DashMap<u64, Request>> = Default::default();
+    let (sender, receiver) = crossbeam_channel::unbounded::<Message>();
+    let pending: Arc<DashMap<u64, Message>> = Default::default();
 
     // ASSUMPTION: Ring size of 128Mi entries. This is very large and will be clamped by the kernel to the maximum supported size. We intentionally request a large value to get the maximum available, as we batch many operations. The kernel will clamp this via IORING_SETUP_CLAMP.
     const RING_SIZE: u32 = 134217728;
@@ -440,23 +546,27 @@ impl Uring {
             next_id = next_id.wrapping_add(1);
 
             let submission_entry = match &msg {
-              Request::Read { req, .. } => {
-                // SAFETY: We're using `as_ptr()` to get a pointer to the buffer. The buffer is owned by the Request and will live until the completion is processed.
-                let ptr = req.out_buf.as_ptr() as *mut u8;
-                build_op!(req.target, |fd| opcode::Read::new(fd, ptr, req.len)
-                  .offset(req.offset)
-                  .build()
-                  .user_data(id))
+              Message::Read { req, .. } => {
+                build_op!(req.target, |fd| opcode::Read::new(
+                  fd,
+                  req.buf_ptr,
+                  req.buf_len
+                )
+                .offset(req.offset)
+                .build()
+                .user_data(id))
               }
-              Request::Write { req, .. } => {
-                let ptr = req.data.as_ptr();
-                let len: u32 = req.data.len().try_into().unwrap();
-                build_op!(req.target, |fd| opcode::Write::new(fd, ptr, len)
-                  .offset(req.offset)
-                  .build()
-                  .user_data(id))
+              Message::Write { req, .. } => {
+                build_op!(req.target, |fd| opcode::Write::new(
+                  fd,
+                  req.buf_ptr,
+                  req.buf_len
+                )
+                .offset(req.offset)
+                .build()
+                .user_data(id))
               }
-              Request::Sync { req, .. } => {
+              Message::Sync { req, .. } => {
                 build_op!(req.target, |fd| {
                   let mut fsync = opcode::Fsync::new(fd);
                   if req.datasync {
@@ -465,10 +575,10 @@ impl Uring {
                   fsync.build().user_data(id)
                 })
               }
-              Request::Statx { req, .. } => {
-                const STATX_BASIC_STATS: u32 = 0x000007ff; // STATX_BASIC_STATS requests the basic stat fields
-                const AT_EMPTY_PATH: i32 = 0x1000; // AT_EMPTY_PATH means interpret dirfd as the file itself
-                static EMPTY_PATH: &std::ffi::CStr = c""; // Empty path - statx with AT_EMPTY_PATH uses the fd directly
+              Message::Statx { req, .. } => {
+                const STATX_BASIC_STATS: u32 = 0x000007ff; // Request all basic stat fields
+                const AT_EMPTY_PATH: i32 = 0x1000; // Interpret fd as the file itself, not a directory
+                static EMPTY_PATH: &std::ffi::CStr = c""; // Empty path since we use AT_EMPTY_PATH
 
                 // Cast libc::statx* to types::statx* - the opcode uses an opaque type but the kernel writes the actual statx struct
                 let statx_ptr = req.statx_buf.as_ptr() as *mut types::statx;
@@ -484,14 +594,14 @@ impl Uring {
                 .build()
                 .user_data(id))
               }
-              Request::Fallocate { req, .. } => {
+              Message::Fallocate { req, .. } => {
                 build_op!(req.target, |fd| opcode::Fallocate::new(fd, req.len)
                   .offset(req.offset)
                   .mode(req.mode)
                   .build()
                   .user_data(id))
               }
-              Request::Fadvise { req, .. } => {
+              Message::Fadvise { req, .. } => {
                 build_op!(req.target, |fd| opcode::Fadvise::new(
                   fd,
                   req.len as i64,
@@ -501,7 +611,7 @@ impl Uring {
                 .build()
                 .user_data(id))
               }
-              Request::Ftruncate { req, .. } => {
+              Message::Ftruncate { req, .. } => {
                 build_op!(req.target, |fd| opcode::Ftruncate::new(fd, req.len)
                   .build()
                   .user_data(id))
@@ -513,13 +623,11 @@ impl Uring {
 
             if submission.is_full() {
               submission.sync();
-              // ASSUMPTION: We unwrap here because ring submission failure is catastrophic and unrecoverable. The ring is in an inconsistent state if this fails.
               ring.submit_and_wait(1).unwrap();
             }
 
-            // SAFETY: The submission entry references memory that will remain valid until the completion is processed (owned by Request).
+            // SAFETY: The submission entry references memory owned by the caller's future, which is awaiting completion.
             unsafe {
-              // This call only has one error: queue is full. It should never happen because we just checked that it's not.
               submission.push(&submission_entry).unwrap();
             };
           }
@@ -598,51 +706,74 @@ impl Uring {
     })
   }
 
-  /// Send a request to the submission thread.
-  fn send(&self, req: Request) {
-    self.sender.send(req).expect("uring submission thread dead");
+  /// Send a message to the submission thread.
+  fn send(&self, msg: Message) {
+    self.sender.send(msg).expect("uring submission thread dead");
   }
 
-  /// Read from a file at the specified offset. Returns the buffer and the number of bytes actually read. The number of bytes read may be less than requested if the file is smaller or if EOF is reached.
+  /// Read into a user-provided buffer. This is the primitive read operation that accepts any buffer type implementing [`IoBufMut`].
+  ///
+  /// The buffer is returned along with the number of bytes read. This allows buffer reuse and supports custom allocators (e.g., aligned buffers for O_DIRECT).
+  pub async fn read_into<B: IoBufMut>(
+    &self,
+    file: &impl UringTarget,
+    offset: u64,
+    mut buf: B,
+  ) -> io::Result<ReadResult<B>> {
+    let target = file.as_target(&self.identity);
+    let ptr = buf.as_mut_ptr();
+    let cap = buf.capacity();
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::Read {
+      req: ReadRequest {
+        target,
+        buf_ptr: ptr,
+        buf_len: cap.try_into().unwrap(),
+        offset,
+      },
+      res: tx,
+    });
+    let bytes_read = rx.await.expect("uring completion channel dropped")?;
+    Ok(ReadResult { buf, bytes_read })
+  }
+
+  /// Read from a file at the specified offset, allocating a buffer internally.
+  ///
+  /// This is a convenience wrapper around [`read_into`](Self::read_into) that allocates a `Vec<u8>`. For zero-copy or custom allocators, use `read_into` directly.
   pub async fn read_at(
     &self,
     file: &impl UringTarget,
     offset: u64,
     len: u64,
-  ) -> io::Result<ReadResult> {
-    let target = file.as_target(&self.identity);
-    let out_buf = vec![0u8; len.try_into().unwrap()];
-    let (tx, rx) = oneshot::channel();
-    self.send(Request::Read {
-      req: ReadRequest {
-        target,
-        out_buf,
-        offset,
-        len: len.try_into().unwrap(),
-      },
-      res: tx,
-    });
-    rx.await.expect("uring completion channel dropped")
+  ) -> io::Result<ReadResult<Vec<u8>>> {
+    let buf = vec![0u8; len.try_into().unwrap()];
+    self.read_into(file, offset, buf).await
   }
 
-  /// Write to a file at the specified offset. Returns the original buffer and number of bytes written. For regular files, `bytes_written` will typically equal `data.len()`. For pipes, sockets, etc., short writes are possible and normal.
-  pub async fn write_at(
+  /// Write a buffer to a file at the specified offset. Accepts any buffer type implementing [`IoBuf`].
+  ///
+  /// The buffer is returned along with the number of bytes written. This allows buffer reuse and supports custom allocators.
+  pub async fn write_at<B: IoBuf>(
     &self,
     file: &impl UringTarget,
     offset: u64,
-    data: Vec<u8>,
-  ) -> io::Result<WriteResult> {
+    buf: B,
+  ) -> io::Result<WriteResult<B>> {
     let target = file.as_target(&self.identity);
+    let ptr = buf.as_ptr();
+    let len = buf.len();
     let (tx, rx) = oneshot::channel();
-    self.send(Request::Write {
+    self.send(Message::Write {
       req: WriteRequest {
         target,
+        buf_ptr: ptr,
+        buf_len: len.try_into().unwrap(),
         offset,
-        data,
       },
       res: tx,
     });
-    rx.await.expect("uring completion channel dropped")
+    let bytes_written = rx.await.expect("uring completion channel dropped")?;
+    Ok(WriteResult { buf, bytes_written })
   }
 
   /// Synchronize file data and metadata to disk (fsync). This ensures that all data and metadata modifications are flushed to the underlying storage device. Even when using direct I/O, this is necessary to ensure the device itself has flushed any internal caches.
@@ -651,7 +782,7 @@ impl Uring {
   pub async fn sync(&self, file: &impl UringTarget) -> io::Result<()> {
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
-    self.send(Request::Sync {
+    self.send(Message::Sync {
       req: SyncRequest {
         target,
         datasync: false,
@@ -665,7 +796,7 @@ impl Uring {
   pub async fn datasync(&self, file: &impl UringTarget) -> io::Result<()> {
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
-    self.send(Request::Sync {
+    self.send(Message::Sync {
       req: SyncRequest {
         target,
         datasync: true,
@@ -678,10 +809,9 @@ impl Uring {
   /// Get file status information (statx). This is the io_uring equivalent of `fstat`/`statx`. It returns metadata about the file including size, permissions, timestamps, etc. Requires Linux 5.6+. On older kernels, this will fail with `EINVAL`.
   pub async fn statx(&self, file: &impl UringTarget) -> io::Result<Metadata> {
     let target = file.as_target(&self.identity);
-    // Allocate buffer for the kernel to write statx result
     let statx_buf = Box::new(MaybeUninit::<libc::statx>::uninit());
     let (tx, rx) = oneshot::channel();
-    self.send(Request::Statx {
+    self.send(Message::Statx {
       req: StatxRequest { target, statx_buf },
       res: tx,
     });
@@ -698,7 +828,7 @@ impl Uring {
   ) -> io::Result<()> {
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
-    self.send(Request::Fallocate {
+    self.send(Message::Fallocate {
       req: FallocateRequest {
         target,
         offset,
@@ -720,7 +850,7 @@ impl Uring {
   ) -> io::Result<()> {
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
-    self.send(Request::Fadvise {
+    self.send(Message::Fadvise {
       req: FadviseRequest {
         target,
         offset,
@@ -736,7 +866,7 @@ impl Uring {
   pub async fn ftruncate(&self, file: &impl UringTarget, len: u64) -> io::Result<()> {
     let target = file.as_target(&self.identity);
     let (tx, rx) = oneshot::channel();
-    self.send(Request::Ftruncate {
+    self.send(Message::Ftruncate {
       req: FtruncateRequest { target, len },
       res: tx,
     });

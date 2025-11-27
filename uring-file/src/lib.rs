@@ -94,10 +94,10 @@ pub fn default_uring() -> &'static Uring {
 /// This trait is implemented for `std::fs::File` and `tokio::fs::File`, allowing you to call io_uring operations directly on file handles. All operations use the global default io_uring instance. For more control, use the `Uring` struct directly.
 pub trait UringFile: AsRawFd {
   /// Read from the file at the specified offset. Returns the buffer and actual bytes read. The buffer may contain fewer bytes than requested if EOF is reached.
-  async fn ur_read_at(&self, offset: u64, len: u64) -> io::Result<ReadResult>;
+  async fn ur_read_at(&self, offset: u64, len: u64) -> io::Result<ReadResult<Vec<u8>>>;
 
   /// Write to the file at the specified offset. Returns the original buffer and bytes written.
-  async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult>;
+  async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult<Vec<u8>>>;
 
   /// Synchronize file data and metadata to disk (fsync).
   async fn ur_sync(&self) -> io::Result<()>;
@@ -119,11 +119,11 @@ pub trait UringFile: AsRawFd {
 }
 
 impl UringFile for StdFile {
-  async fn ur_read_at(&self, offset: u64, len: u64) -> io::Result<ReadResult> {
+  async fn ur_read_at(&self, offset: u64, len: u64) -> io::Result<ReadResult<Vec<u8>>> {
     DEFAULT_URING.read_at(self, offset, len).await
   }
 
-  async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult> {
+  async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult<Vec<u8>>> {
     DEFAULT_URING.write_at(self, offset, data).await
   }
 
@@ -153,11 +153,11 @@ impl UringFile for StdFile {
 }
 
 impl UringFile for TokioFile {
-  async fn ur_read_at(&self, offset: u64, len: u64) -> io::Result<ReadResult> {
+  async fn ur_read_at(&self, offset: u64, len: u64) -> io::Result<ReadResult<Vec<u8>>> {
     DEFAULT_URING.read_at(self, offset, len).await
   }
 
-  async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult> {
+  async fn ur_write_at(&self, offset: u64, data: Vec<u8>) -> io::Result<WriteResult<Vec<u8>>> {
     DEFAULT_URING.write_at(self, offset, data).await
   }
 
