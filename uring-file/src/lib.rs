@@ -58,6 +58,7 @@
 #![cfg(target_os = "linux")]
 #![allow(async_fn_in_trait)]
 
+pub mod fs;
 pub mod metadata;
 pub mod uring;
 

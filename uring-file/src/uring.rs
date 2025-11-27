@@ -321,6 +321,20 @@ struct MkdirAtRequest {
   mode: u32,
 }
 
+struct SymlinkAtRequest {
+  new_dir_fd: RawFd,
+  target: CString,
+  link_path: CString,
+}
+
+struct LinkAtRequest {
+  old_dir_fd: RawFd,
+  old_path: CString,
+  new_dir_fd: RawFd,
+  new_path: CString,
+  flags: i32,
+}
+
 // ============================================================================
 // Response Types
 // ============================================================================
@@ -396,6 +410,14 @@ enum Message {
   },
   MkdirAt {
     req: MkdirAtRequest,
+    res: oneshot::Sender<io::Result<()>>,
+  },
+  SymlinkAt {
+    req: SymlinkAtRequest,
+    res: oneshot::Sender<io::Result<()>>,
+  },
+  LinkAt {
+    req: LinkAtRequest,
     res: oneshot::Sender<io::Result<()>>,
   },
 }
@@ -589,6 +611,12 @@ fn handle_completion(msg: Message, result: i32) {
     Message::MkdirAt { res, .. } => {
       let _ = res.send(result.map(|_| ()));
     }
+    Message::SymlinkAt { res, .. } => {
+      let _ = res.send(result.map(|_| ()));
+    }
+    Message::LinkAt { res, .. } => {
+      let _ = res.send(result.map(|_| ()));
+    }
   }
 }
 
@@ -771,6 +799,26 @@ impl Uring {
                   .mode(req.mode)
                   .build()
                   .user_data(id)
+              }
+              Message::SymlinkAt { req, .. } => {
+                opcode::SymlinkAt::new(
+                  types::Fd(req.new_dir_fd),
+                  req.target.as_ptr(),
+                  req.link_path.as_ptr(),
+                )
+                .build()
+                .user_data(id)
+              }
+              Message::LinkAt { req, .. } => {
+                opcode::LinkAt::new(
+                  types::Fd(req.old_dir_fd),
+                  req.old_path.as_ptr(),
+                  types::Fd(req.new_dir_fd),
+                  req.new_path.as_ptr(),
+                )
+                .flags(req.flags)
+                .build()
+                .user_data(id)
               }
             };
 
@@ -1206,6 +1254,72 @@ impl Uring {
     let (tx, rx) = oneshot::channel();
     self.send(Message::MkdirAt {
       req: MkdirAtRequest { dir_fd, path, mode },
+      res: tx,
+    });
+    rx.await.expect("uring completion channel dropped")
+  }
+
+  /// Create a symbolic link. This is the io_uring equivalent of `symlink(2)`. Requires Linux 5.11+.
+  pub async fn symlink(
+    &self,
+    target: impl AsRef<Path>,
+    link_path: impl AsRef<Path>,
+  ) -> io::Result<()> {
+    self.symlink_at(target, libc::AT_FDCWD, link_path).await
+  }
+
+  /// Create a symbolic link relative to a directory fd. This is the io_uring equivalent of `symlinkat(2)`. Requires Linux 5.11+.
+  pub async fn symlink_at(
+    &self,
+    target: impl AsRef<Path>,
+    new_dir_fd: RawFd,
+    link_path: impl AsRef<Path>,
+  ) -> io::Result<()> {
+    let target = path_to_cstring(target.as_ref())?;
+    let link_path = path_to_cstring(link_path.as_ref())?;
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::SymlinkAt {
+      req: SymlinkAtRequest {
+        new_dir_fd,
+        target,
+        link_path,
+      },
+      res: tx,
+    });
+    rx.await.expect("uring completion channel dropped")
+  }
+
+  /// Create a hard link. This is the io_uring equivalent of `link(2)`. Requires Linux 5.11+.
+  pub async fn hard_link(
+    &self,
+    original: impl AsRef<Path>,
+    link: impl AsRef<Path>,
+  ) -> io::Result<()> {
+    self
+      .hard_link_at(libc::AT_FDCWD, original, libc::AT_FDCWD, link, 0)
+      .await
+  }
+
+  /// Create a hard link relative to directory fds. This is the io_uring equivalent of `linkat(2)`. Requires Linux 5.11+.
+  pub async fn hard_link_at(
+    &self,
+    old_dir_fd: RawFd,
+    original: impl AsRef<Path>,
+    new_dir_fd: RawFd,
+    link: impl AsRef<Path>,
+    flags: i32,
+  ) -> io::Result<()> {
+    let old_path = path_to_cstring(original.as_ref())?;
+    let new_path = path_to_cstring(link.as_ref())?;
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::LinkAt {
+      req: LinkAtRequest {
+        old_dir_fd,
+        old_path,
+        new_dir_fd,
+        new_path,
+        flags,
+      },
       res: tx,
     });
     rx.await.expect("uring completion channel dropped")
