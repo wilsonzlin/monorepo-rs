@@ -252,8 +252,7 @@ pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     return Ok(Vec::new());
   }
 
-  let result = uring.read_at(&fd, 0, size).await?;
-  Ok(result.buf)
+  uring.read_exact_at(&fd, 0, size).await
 }
 
 /// Read the entire contents of a file into a string.
@@ -274,9 +273,7 @@ pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Re
       0o644,
     )
     .await?;
-  let data = contents.as_ref().to_vec();
-  uring.write_at(&fd, 0, data).await?;
-  Ok(())
+  uring.write_all_at(&fd, 0, contents.as_ref()).await
 }
 
 /// Get metadata for a file or directory.
@@ -410,8 +407,6 @@ pub async fn append(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::R
       0o644,
     )
     .await?;
-  let data = contents.as_ref().to_vec();
   // With O_APPEND, the offset is ignored - kernel always writes at end
-  uring.write_at(&fd, 0, data).await?;
-  Ok(())
+  uring.write_all_at(&fd, 0, contents.as_ref()).await
 }
