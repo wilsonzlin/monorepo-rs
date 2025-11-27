@@ -28,9 +28,14 @@ use io_uring::opcode;
 use io_uring::squeue::Entry as SEntry;
 use io_uring::types;
 use std::collections::VecDeque;
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::IntoRawFd;
+use std::os::fd::OwnedFd;
 use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
@@ -259,6 +264,28 @@ struct FtruncateRequest {
   len: u64,
 }
 
+struct OpenAtRequest {
+  /// Directory fd for relative paths, or AT_FDCWD for current directory.
+  dir_fd: RawFd,
+  /// Path to open. Owned to ensure validity until completion.
+  path: CString,
+  flags: i32,
+  mode: u32,
+}
+
+struct StatxPathRequest {
+  /// Directory fd for relative paths, or AT_FDCWD for current directory.
+  dir_fd: RawFd,
+  /// Path to stat. Owned to ensure validity until completion.
+  path: CString,
+  flags: i32,
+  statx_buf: Box<MaybeUninit<libc::statx>>,
+}
+
+struct CloseRequest {
+  fd: RawFd,
+}
+
 // ============================================================================
 // Response Types
 // ============================================================================
@@ -310,6 +337,18 @@ enum Message {
   },
   Ftruncate {
     req: FtruncateRequest,
+    res: oneshot::Sender<io::Result<()>>,
+  },
+  OpenAt {
+    req: OpenAtRequest,
+    res: oneshot::Sender<io::Result<OwnedFd>>,
+  },
+  StatxPath {
+    req: StatxPathRequest,
+    res: oneshot::Sender<io::Result<Metadata>>,
+  },
+  Close {
+    req: CloseRequest,
     res: oneshot::Sender<io::Result<()>>,
   },
 }
@@ -476,6 +515,24 @@ fn handle_completion(msg: Message, result: i32) {
     Message::Ftruncate { res, .. } => {
       let _ = res.send(result.map(|_| ()));
     }
+    Message::OpenAt { res, .. } => {
+      let outcome = result.map(|fd| {
+        // SAFETY: The kernel returns a valid fd on success
+        unsafe { OwnedFd::from_raw_fd(fd) }
+      });
+      let _ = res.send(outcome);
+    }
+    Message::StatxPath { req, res } => {
+      let outcome = result.map(|_| {
+        // SAFETY: The kernel has initialized the statx buffer
+        let statx = unsafe { (*req.statx_buf).assume_init() };
+        Metadata(statx)
+      });
+      let _ = res.send(outcome);
+    }
+    Message::Close { res, .. } => {
+      let _ = res.send(result.map(|_| ()));
+    }
   }
 }
 
@@ -615,6 +672,26 @@ impl Uring {
                 build_op!(req.target, |fd| opcode::Ftruncate::new(fd, req.len)
                   .build()
                   .user_data(id))
+              }
+              Message::OpenAt { req, .. } => {
+                opcode::OpenAt::new(types::Fd(req.dir_fd), req.path.as_ptr())
+                  .flags(req.flags)
+                  .mode(req.mode)
+                  .build()
+                  .user_data(id)
+              }
+              Message::StatxPath { req, .. } => {
+                const STATX_BASIC_STATS: u32 = 0x000007ff;
+                let statx_ptr = req.statx_buf.as_ptr() as *mut types::statx;
+
+                opcode::Statx::new(types::Fd(req.dir_fd), req.path.as_ptr(), statx_ptr)
+                  .flags(req.flags)
+                  .mask(STATX_BASIC_STATS)
+                  .build()
+                  .user_data(id)
+              }
+              Message::Close { req, .. } => {
+                opcode::Close::new(types::Fd(req.fd)).build().user_data(id)
               }
             };
 
@@ -818,7 +895,7 @@ impl Uring {
     rx.await.expect("uring completion channel dropped")
   }
 
-  /// Pre-allocate or deallocate space for a file (fallocate). This can be used to pre-allocate space to avoid fragmentation, punch holes in sparse files, or zero-fill regions. See [`falloc`] module for mode flags. Requires Linux 5.6+.
+  /// Pre-allocate or deallocate space for a file (fallocate). This can be used to pre-allocate space to avoid fragmentation, punch holes in sparse files, or zero-fill regions. Use `libc::FALLOC_FL_*` constants for mode flags. Requires Linux 5.6+.
   pub async fn fallocate(
     &self,
     file: &impl UringTarget,
@@ -840,7 +917,7 @@ impl Uring {
     rx.await.expect("uring completion channel dropped")
   }
 
-  /// Advise the kernel about expected file access patterns (fadvise). This is a hint to the kernel about how you intend to access a file region. The kernel may use this to optimize readahead, caching, etc. See [`advice`] module for advice values. Requires Linux 5.6+.
+  /// Advise the kernel about expected file access patterns (fadvise). This is a hint to the kernel about how you intend to access a file region. The kernel may use this to optimize readahead, caching, etc. Use `libc::POSIX_FADV_*` constants for advice values. Requires Linux 5.6+.
   pub async fn fadvise(
     &self,
     file: &impl UringTarget,
@@ -872,45 +949,97 @@ impl Uring {
     });
     rx.await.expect("uring completion channel dropped")
   }
-}
 
-// ============================================================================
-// Constants for fadvise
-// ============================================================================
+  /// Open a file asynchronously. This is the io_uring equivalent of `open(2)`/`openat(2)`. Requires Linux 5.6+.
+  ///
+  /// # Arguments
+  ///
+  /// * `path` - Path to open (any `CStr`-like type: `&CStr`, `CString`, `c"literal"`).
+  /// * `flags` - Open flags from `libc` (e.g., `libc::O_RDONLY`, `libc::O_RDWR | libc::O_CREAT`).
+  /// * `mode` - File mode for creation (only used with `O_CREAT`).
+  ///
+  /// # Returns
+  ///
+  /// Returns an `OwnedFd` on success. The fd is automatically closed when dropped.
+  pub async fn open(&self, path: impl AsRef<CStr>, flags: i32, mode: u32) -> io::Result<OwnedFd> {
+    self.open_at(libc::AT_FDCWD, path, flags, mode).await
+  }
 
-/// fadvise advice values. These are the standard POSIX fadvise constants.
-pub mod advice {
-  /// No special treatment (default).
-  pub const NORMAL: i32 = libc::POSIX_FADV_NORMAL;
-  /// Expect random access pattern.
-  pub const RANDOM: i32 = libc::POSIX_FADV_RANDOM;
-  /// Expect sequential access pattern.
-  pub const SEQUENTIAL: i32 = libc::POSIX_FADV_SEQUENTIAL;
-  /// Data will be needed soon (trigger readahead).
-  pub const WILLNEED: i32 = libc::POSIX_FADV_WILLNEED;
-  /// Data won't be needed soon (may be evicted from cache).
-  pub const DONTNEED: i32 = libc::POSIX_FADV_DONTNEED;
-  /// Data will be accessed once (don't keep in cache).
-  pub const NOREUSE: i32 = libc::POSIX_FADV_NOREUSE;
-}
+  /// Open a file relative to a directory fd. This is useful for safe path traversal and avoiding TOCTOU races. Requires Linux 5.6+.
+  ///
+  /// # Arguments
+  ///
+  /// * `dir_fd` - Directory fd for relative paths, or `libc::AT_FDCWD` for current directory.
+  /// * `path` - Path to open relative to `dir_fd`.
+  /// * `flags` - Open flags.
+  /// * `mode` - File mode for creation.
+  pub async fn open_at(
+    &self,
+    dir_fd: RawFd,
+    path: impl AsRef<CStr>,
+    flags: i32,
+    mode: u32,
+  ) -> io::Result<OwnedFd> {
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::OpenAt {
+      req: OpenAtRequest {
+        dir_fd,
+        path: path.as_ref().into(),
+        flags,
+        mode,
+      },
+      res: tx,
+    });
+    rx.await.expect("uring completion channel dropped")
+  }
 
-// ============================================================================
-// Constants for fallocate
-// ============================================================================
+  /// Get file metadata by path without opening the file. This is the io_uring equivalent of `stat(2)`/`statx(2)`. Requires Linux 5.6+.
+  ///
+  /// Unlike `statx()` which operates on an open fd, this method stats the path directly.
+  pub async fn statx_path(&self, path: impl AsRef<CStr>) -> io::Result<Metadata> {
+    self.statx_at(libc::AT_FDCWD, path, 0).await
+  }
 
-/// fallocate mode flags.
-pub mod falloc {
-  /// Don't modify the file size.
-  pub const KEEP_SIZE: i32 = libc::FALLOC_FL_KEEP_SIZE;
-  /// Deallocate space (punch a hole).
-  pub const PUNCH_HOLE: i32 = libc::FALLOC_FL_PUNCH_HOLE;
-  /// Zero-fill a range without allocating.
-  #[cfg(target_os = "linux")]
-  pub const ZERO_RANGE: i32 = 0x10; // FALLOC_FL_ZERO_RANGE
-  /// Collapse a range (remove without leaving a hole).
-  #[cfg(target_os = "linux")]
-  pub const COLLAPSE_RANGE: i32 = 0x08; // FALLOC_FL_COLLAPSE_RANGE
-  /// Insert a range (shift data).
-  #[cfg(target_os = "linux")]
-  pub const INSERT_RANGE: i32 = 0x20; // FALLOC_FL_INSERT_RANGE
+  /// Get file metadata relative to a directory fd. This allows safe path traversal and additional flags for controlling symlink behavior. Requires Linux 5.6+.
+  ///
+  /// # Arguments
+  ///
+  /// * `dir_fd` - Directory fd for relative paths, or `libc::AT_FDCWD` for current directory.
+  /// * `path` - Path to stat relative to `dir_fd`.
+  /// * `flags` - Flags from `libc` (e.g., `libc::AT_SYMLINK_NOFOLLOW` to not follow symlinks).
+  pub async fn statx_at(
+    &self,
+    dir_fd: RawFd,
+    path: impl AsRef<CStr>,
+    flags: i32,
+  ) -> io::Result<Metadata> {
+    let statx_buf = Box::new(MaybeUninit::<libc::statx>::uninit());
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::StatxPath {
+      req: StatxPathRequest {
+        dir_fd,
+        path: path.as_ref().into(),
+        flags,
+        statx_buf,
+      },
+      res: tx,
+    });
+    rx.await.expect("uring completion channel dropped")
+  }
+
+  /// Close a file descriptor asynchronously. This is the io_uring equivalent of `close(2)`. Requires Linux 5.6+.
+  ///
+  /// Takes ownership of the fd to prevent the automatic synchronous close on drop. This is useful when you want to:
+  /// - Handle close errors (which are silently ignored by `OwnedFd::drop`)
+  /// - Batch close operations with other io_uring operations
+  /// - Avoid blocking the async runtime on close
+  pub async fn close(&self, fd: impl IntoRawFd) -> io::Result<()> {
+    let raw_fd = fd.into_raw_fd();
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::Close {
+      req: CloseRequest { fd: raw_fd },
+      res: tx,
+    });
+    rx.await.expect("uring completion channel dropped")
+  }
 }
