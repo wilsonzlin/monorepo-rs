@@ -170,13 +170,13 @@ ring.read_at(&registered, 0, 1024).await?;
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│ Async tasks │────▶│ Submission thread │────▶│    io_uring     │
-└─────────────┘     └──────────────────┘     └────────┬────────┘
-       ▲                                              │
-       │            ┌──────────────────┐              │
-       └────────────│ Completion thread │◀────────────┘
-                    └──────────────────┘
+┌─────────────┐     ┌───────────────────┐     ┌─────────────┐
+│ Async tasks │────▶│ Submission thread │────▶│  io_uring   │
+└─────────────┘     └───────────────────┘     └──────┬──────┘
+       ▲                                             │
+       │            ┌───────────────────┐            │
+       └────────────│ Completion thread │◀───────────┘
+                    └───────────────────┘
 ```
 
 Async tasks send requests to a submission thread that batches them into the io_uring submission queue. A completion thread polls for results and wakes the appropriate futures.
