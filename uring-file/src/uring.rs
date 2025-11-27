@@ -28,7 +28,6 @@ use io_uring::opcode;
 use io_uring::squeue::Entry as SEntry;
 use io_uring::types;
 use std::collections::VecDeque;
-use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;
@@ -37,6 +36,8 @@ use std::os::fd::FromRawFd;
 use std::os::fd::IntoRawFd;
 use std::os::fd::OwnedFd;
 use std::os::fd::RawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
@@ -54,6 +55,20 @@ pub const URING_LEN_MAX: u64 = 2 * 1024 * 1024 * 1024 - 4096;
 
 /// Maximum number of files that can be registered with a single Uring instance.
 const MAX_REGISTERED_FILES: u32 = 4096;
+
+// ============================================================================
+// Path Conversion
+// ============================================================================
+
+/// Convert a path to a CString for use with io_uring operations.
+fn path_to_cstring(path: &Path) -> io::Result<CString> {
+  CString::new(path.as_os_str().as_bytes()).map_err(|e| {
+    io::Error::new(
+      io::ErrorKind::InvalidInput,
+      format!("path contains null byte at position {}", e.nul_position()),
+    )
+  })
+}
 
 // ============================================================================
 // Buffer Traits
@@ -286,6 +301,26 @@ struct CloseRequest {
   fd: RawFd,
 }
 
+struct RenameAtRequest {
+  old_dir_fd: RawFd,
+  old_path: CString,
+  new_dir_fd: RawFd,
+  new_path: CString,
+  flags: u32,
+}
+
+struct UnlinkAtRequest {
+  dir_fd: RawFd,
+  path: CString,
+  flags: i32,
+}
+
+struct MkdirAtRequest {
+  dir_fd: RawFd,
+  path: CString,
+  mode: u32,
+}
+
 // ============================================================================
 // Response Types
 // ============================================================================
@@ -349,6 +384,18 @@ enum Message {
   },
   Close {
     req: CloseRequest,
+    res: oneshot::Sender<io::Result<()>>,
+  },
+  RenameAt {
+    req: RenameAtRequest,
+    res: oneshot::Sender<io::Result<()>>,
+  },
+  UnlinkAt {
+    req: UnlinkAtRequest,
+    res: oneshot::Sender<io::Result<()>>,
+  },
+  MkdirAt {
+    req: MkdirAtRequest,
     res: oneshot::Sender<io::Result<()>>,
   },
 }
@@ -533,6 +580,15 @@ fn handle_completion(msg: Message, result: i32) {
     Message::Close { res, .. } => {
       let _ = res.send(result.map(|_| ()));
     }
+    Message::RenameAt { res, .. } => {
+      let _ = res.send(result.map(|_| ()));
+    }
+    Message::UnlinkAt { res, .. } => {
+      let _ = res.send(result.map(|_| ()));
+    }
+    Message::MkdirAt { res, .. } => {
+      let _ = res.send(result.map(|_| ()));
+    }
   }
 }
 
@@ -692,6 +748,29 @@ impl Uring {
               }
               Message::Close { req, .. } => {
                 opcode::Close::new(types::Fd(req.fd)).build().user_data(id)
+              }
+              Message::RenameAt { req, .. } => {
+                opcode::RenameAt::new(
+                  types::Fd(req.old_dir_fd),
+                  req.old_path.as_ptr(),
+                  types::Fd(req.new_dir_fd),
+                  req.new_path.as_ptr(),
+                )
+                .flags(req.flags)
+                .build()
+                .user_data(id)
+              }
+              Message::UnlinkAt { req, .. } => {
+                opcode::UnlinkAt::new(types::Fd(req.dir_fd), req.path.as_ptr())
+                  .flags(req.flags)
+                  .build()
+                  .user_data(id)
+              }
+              Message::MkdirAt { req, .. } => {
+                opcode::MkDirAt::new(types::Fd(req.dir_fd), req.path.as_ptr())
+                  .mode(req.mode)
+                  .build()
+                  .user_data(id)
               }
             };
 
@@ -961,7 +1040,7 @@ impl Uring {
   /// # Returns
   ///
   /// Returns an `OwnedFd` on success. The fd is automatically closed when dropped.
-  pub async fn open(&self, path: impl AsRef<CStr>, flags: i32, mode: u32) -> io::Result<OwnedFd> {
+  pub async fn open(&self, path: impl AsRef<Path>, flags: i32, mode: u32) -> io::Result<OwnedFd> {
     self.open_at(libc::AT_FDCWD, path, flags, mode).await
   }
 
@@ -976,15 +1055,16 @@ impl Uring {
   pub async fn open_at(
     &self,
     dir_fd: RawFd,
-    path: impl AsRef<CStr>,
+    path: impl AsRef<Path>,
     flags: i32,
     mode: u32,
   ) -> io::Result<OwnedFd> {
+    let path = path_to_cstring(path.as_ref())?;
     let (tx, rx) = oneshot::channel();
     self.send(Message::OpenAt {
       req: OpenAtRequest {
         dir_fd,
-        path: path.as_ref().into(),
+        path,
         flags,
         mode,
       },
@@ -996,7 +1076,7 @@ impl Uring {
   /// Get file metadata by path without opening the file. This is the io_uring equivalent of `stat(2)`/`statx(2)`. Requires Linux 5.6+.
   ///
   /// Unlike `statx()` which operates on an open fd, this method stats the path directly.
-  pub async fn statx_path(&self, path: impl AsRef<CStr>) -> io::Result<Metadata> {
+  pub async fn statx_path(&self, path: impl AsRef<Path>) -> io::Result<Metadata> {
     self.statx_at(libc::AT_FDCWD, path, 0).await
   }
 
@@ -1010,15 +1090,16 @@ impl Uring {
   pub async fn statx_at(
     &self,
     dir_fd: RawFd,
-    path: impl AsRef<CStr>,
+    path: impl AsRef<Path>,
     flags: i32,
   ) -> io::Result<Metadata> {
+    let path = path_to_cstring(path.as_ref())?;
     let statx_buf = Box::new(MaybeUninit::<libc::statx>::uninit());
     let (tx, rx) = oneshot::channel();
     self.send(Message::StatxPath {
       req: StatxPathRequest {
         dir_fd,
-        path: path.as_ref().into(),
+        path,
         flags,
         statx_buf,
       },
@@ -1038,6 +1119,93 @@ impl Uring {
     let (tx, rx) = oneshot::channel();
     self.send(Message::Close {
       req: CloseRequest { fd: raw_fd },
+      res: tx,
+    });
+    rx.await.expect("uring completion channel dropped")
+  }
+
+  /// Rename a file asynchronously. This is the io_uring equivalent of `rename(2)`. Requires Linux 5.11+.
+  pub async fn rename(
+    &self,
+    old_path: impl AsRef<Path>,
+    new_path: impl AsRef<Path>,
+  ) -> io::Result<()> {
+    self
+      .rename_at(libc::AT_FDCWD, old_path, libc::AT_FDCWD, new_path, 0)
+      .await
+  }
+
+  /// Rename a file relative to directory fds. This is the io_uring equivalent of `renameat2(2)`. Requires Linux 5.11+.
+  ///
+  /// Flags can include `libc::RENAME_NOREPLACE`, `libc::RENAME_EXCHANGE`, etc.
+  pub async fn rename_at(
+    &self,
+    old_dir_fd: RawFd,
+    old_path: impl AsRef<Path>,
+    new_dir_fd: RawFd,
+    new_path: impl AsRef<Path>,
+    flags: u32,
+  ) -> io::Result<()> {
+    let old_path = path_to_cstring(old_path.as_ref())?;
+    let new_path = path_to_cstring(new_path.as_ref())?;
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::RenameAt {
+      req: RenameAtRequest {
+        old_dir_fd,
+        old_path,
+        new_dir_fd,
+        new_path,
+        flags,
+      },
+      res: tx,
+    });
+    rx.await.expect("uring completion channel dropped")
+  }
+
+  /// Delete a file or empty directory. This is the io_uring equivalent of `unlink(2)`. Requires Linux 5.11+.
+  pub async fn unlink(&self, path: impl AsRef<Path>) -> io::Result<()> {
+    self.unlink_at(libc::AT_FDCWD, path, 0).await
+  }
+
+  /// Delete a directory. This is the io_uring equivalent of `rmdir(2)`. Requires Linux 5.11+.
+  pub async fn rmdir(&self, path: impl AsRef<Path>) -> io::Result<()> {
+    self.unlink_at(libc::AT_FDCWD, path, libc::AT_REMOVEDIR).await
+  }
+
+  /// Delete a file or directory relative to a directory fd. This is the io_uring equivalent of `unlinkat(2)`. Requires Linux 5.11+.
+  ///
+  /// Use `libc::AT_REMOVEDIR` flag to remove directories.
+  pub async fn unlink_at(
+    &self,
+    dir_fd: RawFd,
+    path: impl AsRef<Path>,
+    flags: i32,
+  ) -> io::Result<()> {
+    let path = path_to_cstring(path.as_ref())?;
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::UnlinkAt {
+      req: UnlinkAtRequest { dir_fd, path, flags },
+      res: tx,
+    });
+    rx.await.expect("uring completion channel dropped")
+  }
+
+  /// Create a directory. This is the io_uring equivalent of `mkdir(2)`. Requires Linux 5.15+.
+  pub async fn mkdir(&self, path: impl AsRef<Path>, mode: u32) -> io::Result<()> {
+    self.mkdir_at(libc::AT_FDCWD, path, mode).await
+  }
+
+  /// Create a directory relative to a directory fd. This is the io_uring equivalent of `mkdirat(2)`. Requires Linux 5.15+.
+  pub async fn mkdir_at(
+    &self,
+    dir_fd: RawFd,
+    path: impl AsRef<Path>,
+    mode: u32,
+  ) -> io::Result<()> {
+    let path = path_to_cstring(path.as_ref())?;
+    let (tx, rx) = oneshot::channel();
+    self.send(Message::MkdirAt {
+      req: MkdirAtRequest { dir_fd, path, mode },
       res: tx,
     });
     rx.await.expect("uring completion channel dropped")
