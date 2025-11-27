@@ -1,6 +1,6 @@
 [package]
 name = "uring-file"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "Async file I/O for Linux using io_uring"
 license = "MIT OR Apache-2.0"
