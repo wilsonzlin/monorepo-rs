@@ -39,8 +39,13 @@ use std::thread;
 use tokio::sync::oneshot;
 
 // ============================================================================
-// File Target Types
+// Constants
 // ============================================================================
+
+/// Maximum length for a single io_uring read/write operation.
+///
+/// io_uring uses i32 for return values, limiting single operations to ~2GB. The actual limit is 4096 bytes less than 2GB for unknown reasons.
+pub const URING_LEN_MAX: u64 = 2 * 1024 * 1024 * 1024 - 4096;
 
 /// Maximum number of files that can be registered with a single Uring instance.
 const MAX_REGISTERED_FILES: u32 = 4096;
