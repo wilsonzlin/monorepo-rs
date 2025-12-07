@@ -73,6 +73,9 @@ use uring::Uring;
 use uring::UringCfg;
 use uring::WriteResult;
 
+// Re-export for convenience
+pub use uring::DEFAULT_RING_SIZE;
+
 // ============================================================================
 // Global Default Ring
 // ============================================================================

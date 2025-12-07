@@ -427,6 +427,13 @@ enum Message {
 // Uring Configuration
 // ============================================================================
 
+/// Default ring size for io_uring (16384 entries).
+///
+/// This is a conservative default that works in most environments including containers
+/// and memory-constrained systems. The kernel will further clamp this if needed via
+/// `IORING_SETUP_CLAMP`.
+pub const DEFAULT_RING_SIZE: u32 = 16384;
+
 /// Configuration options for io_uring initialization.
 ///
 /// These are advanced options that affect io_uring behavior. Most users should use `UringCfg::default()`. Incorrect configuration may cause `EINVAL` errors or degraded performance.
@@ -438,8 +445,17 @@ enum Message {
 /// - `defer_taskrun`: Linux 6.1+
 /// - `sqpoll`: Requires `CAP_SYS_NICE` capability
 /// - `iopoll`: Only works with O_DIRECT files on supported filesystems
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct UringCfg {
+  /// Size of the io_uring submission/completion queues (number of entries).
+  ///
+  /// Larger values allow more operations to be batched but consume more memory.
+  /// The kernel will clamp this to the maximum supported size via `IORING_SETUP_CLAMP`.
+  ///
+  /// If you encounter `ENOMEM` errors during initialization, try reducing this value.
+  /// Defaults to [`DEFAULT_RING_SIZE`] (16384 entries).
+  pub ring_size: u32,
+
   /// Enable cooperative task running (Linux 5.19+). When enabled, the kernel will only process completions when the application explicitly asks for them, reducing overhead.
   pub coop_taskrun: bool,
 
@@ -451,6 +467,18 @@ pub struct UringCfg {
 
   /// Enable submission queue polling with the given idle timeout in milliseconds. When enabled, a kernel thread will poll the submission queue, eliminating the need for system calls to submit I/O. The thread will go to sleep after being idle for the specified duration. **Requires `CAP_SYS_NICE` capability.**
   pub sqpoll: Option<u32>,
+}
+
+impl Default for UringCfg {
+  fn default() -> Self {
+    Self {
+      ring_size: DEFAULT_RING_SIZE,
+      coop_taskrun: false,
+      defer_taskrun: false,
+      iopoll: false,
+      sqpoll: None,
+    }
+  }
 }
 
 // ============================================================================
@@ -633,12 +661,9 @@ impl Uring {
     let (sender, receiver) = crossbeam_channel::unbounded::<Message>();
     let pending: Arc<DashMap<u64, Message>> = Default::default();
 
-    // ASSUMPTION: Ring size of 128Mi entries. This is very large and will be clamped by the kernel to the maximum supported size. We intentionally request a large value to get the maximum available, as we batch many operations. The kernel will clamp this via IORING_SETUP_CLAMP.
-    const RING_SIZE: u32 = 134217728;
-
     let ring = {
       let mut builder = IoUring::<SEntry, CEntry>::builder();
-      // ASSUMPTION: We use IORING_SETUP_CLAMP to let the kernel reduce the ring size if our requested size exceeds system limits. This is safer than failing outright.
+      // Use IORING_SETUP_CLAMP to let the kernel reduce the ring size if our requested size exceeds system limits. This is safer than failing outright.
       builder.setup_clamp();
       if cfg.coop_taskrun {
         builder.setup_coop_taskrun();
@@ -652,7 +677,7 @@ impl Uring {
       if let Some(sqpoll) = cfg.sqpoll {
         builder.setup_sqpoll(sqpoll);
       };
-      builder.build(RING_SIZE)?
+      builder.build(cfg.ring_size)?
     };
 
     // Pre-allocate sparse file table for registration (Linux 5.12+). If this fails, file registration won't work but unregistered fds will still function.
