@@ -54,6 +54,12 @@
 //! # Platform Support
 //!
 //! This crate only compiles on Linux. On other platforms, it will fail at compile time.
+//!
+//! # Troubleshooting
+//!
+//! `ENOMEM` on init usually means memory fragmentation, not insufficient RAM. Ring buffers
+//! need physically contiguous memory (1 MiB for default 16384 entries). On fragmented
+//! systems, reduce [`uring::UringCfg::ring_size`] to 8192 (needs 512 KiB). See README.
 
 #![cfg(target_os = "linux")]
 #![allow(async_fn_in_trait)]

@@ -429,9 +429,21 @@ enum Message {
 
 /// Default ring size for io_uring (16384 entries).
 ///
-/// This is a conservative default that works in most environments including containers
-/// and memory-constrained systems. The kernel will further clamp this if needed via
-/// `IORING_SETUP_CLAMP`.
+/// Works in most environments. The kernel clamps to max supported size via `IORING_SETUP_CLAMP`.
+///
+/// # Memory
+///
+/// Ring size determines contiguous kernel memory required:
+///
+/// | Ring Size | SQE Array  | CQE Array  | Total |
+/// |-----------|------------|------------|-------|
+/// | 4096      | 256 KiB    | 128 KiB    | ~400 KiB |
+/// | 8192      | 512 KiB    | 256 KiB    | ~800 KiB |
+/// | 16384     | 1 MiB      | 512 KiB    | ~1.6 MiB |
+/// | 32768     | 2 MiB      | 1 MiB      | ~3.2 MiB |
+///
+/// These must be physically contiguous. On fragmented systems, larger rings may fail
+/// with `ENOMEM` despite having free memory. See [`UringCfg::ring_size`].
 pub const DEFAULT_RING_SIZE: u32 = 16384;
 
 /// Configuration options for io_uring initialization.
@@ -447,13 +459,26 @@ pub const DEFAULT_RING_SIZE: u32 = 16384;
 /// - `iopoll`: Only works with O_DIRECT files on supported filesystems
 #[derive(Clone, Debug)]
 pub struct UringCfg {
-  /// Size of the io_uring submission/completion queues (number of entries).
+  /// Size of the submission/completion queues (number of entries).
   ///
-  /// Larger values allow more operations to be batched but consume more memory.
-  /// The kernel will clamp this to the maximum supported size via `IORING_SETUP_CLAMP`.
+  /// Larger values allow more batching but need more memory. Kernel clamps to max
+  /// supported size. Defaults to [`DEFAULT_RING_SIZE`] (16384).
   ///
-  /// If you encounter `ENOMEM` errors during initialization, try reducing this value.
-  /// Defaults to [`DEFAULT_RING_SIZE`] (16384 entries).
+  /// # ENOMEM on fragmented systems
+  ///
+  /// The kernel allocates physically contiguous memory for ring structures:
+  /// SQE array needs `ring_size * 64` bytes, CQE array needs `ring_size * 2 * 16` bytes.
+  ///
+  /// On long-running systems, memory fragmentation can eliminate large contiguous
+  /// blocks. You'll get `ENOMEM` from `io_uring_setup` even with plenty of free RAM.
+  ///
+  /// Workarounds:
+  /// - Reduce `ring_size` to 8192 (512 KiB contiguous vs 1 MiB for 16384)
+  /// - `echo 3 > /proc/sys/vm/drop_caches` (frees page cache, temporary fix)
+  /// - `echo 1 > /proc/sys/vm/compact_memory` (triggers defrag)
+  ///
+  /// Check fragmentation with `/proc/buddyinfo`. Order-8 columns (1 MiB blocks) need
+  /// nonzero values for 16384-entry rings; order-7 (512 KiB) for 8192-entry rings.
   pub ring_size: u32,
 
   /// Enable cooperative task running (Linux 5.19+). When enabled, the kernel will only process completions when the application explicitly asks for them, reducing overhead.

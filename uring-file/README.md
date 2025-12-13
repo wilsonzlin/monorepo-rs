@@ -174,6 +174,37 @@ ring.read_at(&registered, 0, 1024).await?;
 
 - **~2GB per operation** — Single read/write operations are limited to approximately 2GB (`uring::URING_LEN_MAX`). Chunk larger transfers.
 
+## Troubleshooting
+
+### ENOMEM on ring init
+
+`Uring::new()` can fail with `ENOMEM` due to memory fragmentation, not insufficient RAM.
+
+io_uring needs physically contiguous kernel memory for ring buffers. The default 16384-entry ring needs 1 MiB contiguous for the SQE array. On long-running systems, fragmentation can eliminate all large contiguous blocks.
+
+Check fragmentation:
+
+```bash
+cat /proc/buddyinfo
+# order-8 column = 1MB blocks, order-7 = 512KB
+# zeros in high-order columns = fragmented
+```
+
+Fixes:
+
+```rust
+// Use smaller ring (8192 needs 512 KiB vs 1 MiB for 16384)
+let uring = Uring::new(UringCfg { ring_size: 8192, ..Default::default() })?;
+```
+
+```bash
+# Or free page cache (temporary, needs root)
+sync && echo 3 > /proc/sys/vm/drop_caches
+
+# Or trigger compaction (needs root)  
+echo 1 > /proc/sys/vm/compact_memory
+```
+
 ## Architecture
 
 ```
